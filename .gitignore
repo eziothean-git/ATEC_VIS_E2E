@@ -71,3 +71,12 @@ isaacgym
 *.swp
 
 !deploy/iceoryx/**
+
+# Camera outputs (keep documentation only)
+camera_outputs/*.npy
+camera_outputs/*.png
+camera_outputs/*.csv
+camera_outputs/*.txt
+!camera_outputs/README.md
+!camera_outputs/FAQ.md
+!camera_outputs/use_depth_data_examples.py
