@@ -119,6 +119,16 @@ class SiriusFlatCfg( LeggedRobotCfg ):
     class sim ( LeggedRobotCfg.sim ):
         dt =  0.004
 
+    # camera defaults for sirius
+    class camera(LeggedRobotCfg.camera):
+        enable = False
+        body_name = "trunk"  # main body link in sirius URDF
+        position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
+        rpy = [0.0, 0.6, 0.0]  # pitch down ~34 degrees (positive = looking down)
+        width = 160
+        height = 120
+        horizontal_fov = 90.0
+
 class SiriusFlatCfgPPO( LeggedRobotCfgPPO ):
     class policy( LeggedRobotCfgPPO.policy ):
         actor_hidden_dims = [128, 64, 32]

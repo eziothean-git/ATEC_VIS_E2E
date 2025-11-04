@@ -180,6 +180,20 @@ class LeggedRobotCfg(BaseConfig):
         pos = [10, 0, 6]  # [m]
         lookat = [11., 5, 3.]  # [m]
 
+    # on-robot camera (optional)
+    class camera:
+        enable = False               # set True to create and attach cameras to each env
+        body_name = None             # name of the rigid body to attach the camera to (e.g., "trunk", "base", "base_link"). If None or not found, attaches to the first body
+        # camera local pose relative to the body frame
+        position = [0.2, 0.0, 0.1]   # [m] x,y,z offset from the chosen body
+        rpy = [0.0, -1.57079632679, 0.0]  # [rad] roll, pitch, yaw. Default pitches camera forward (+X) assuming camera looks along -Z by default
+        width = 160                  # image width in pixels (keep small for many envs)
+        height = 120                 # image height in pixels
+        horizontal_fov = 90.0       # [deg]
+        near_plane = 0.05           # [m]
+        far_plane = 10.0            # [m]
+        capture_on_demand = True    # if True, camera images are only rendered when explicitly requested via env.get_camera_depth_images()
+
     class sim:
         dt =  0.005
         substeps = 1

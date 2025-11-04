@@ -33,6 +33,7 @@ from time import time
 from warnings import WarningMessage
 import numpy as np
 import os
+import math
 
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
@@ -68,6 +69,11 @@ class LeggedRobot(BaseTask):
         self.debug_viz = False
         self.init_done = False
         self._parse_cfg(self.cfg)
+        # initialize camera-related flags early (create_sim will call _create_envs)
+        self._camera_initialized = False
+        self.camera_handles = []
+        self.camera_props = None
+        self._camera_warned_missing_body = False
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
 
         if not self.headless:
@@ -650,6 +656,8 @@ class LeggedRobot(BaseTask):
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
+        if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable:
+            print(f"[Camera Debug] Available body names: {body_names}")
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
@@ -697,6 +705,174 @@ class LeggedRobot(BaseTask):
         self.termination_contact_indices = torch.zeros(len(termination_contact_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(termination_contact_names)):
             self.termination_contact_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], termination_contact_names[i])
+
+        # optionally create and attach depth cameras
+        if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable:
+            self._create_and_attach_cameras(body_names)
+
+    # ---------- camera helpers ----------
+    def _quat_from_euler(self, roll: float, pitch: float, yaw: float) -> gymapi.Quat:
+        """Create quaternion from ZYX (roll, pitch, yaw) in radians.
+        Returns gymapi.Quat(x, y, z, w)."""
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+        # ZYX intrinsic -> same as yaw (z), pitch (y), roll (x)
+        w = cr*cp*cy + sr*sp*sy
+        x = sr*cp*cy - cr*sp*sy
+        y = cr*sp*cy + sr*cp*sy
+        z = cr*cp*sy - sr*sp*cy
+        return gymapi.Quat(x, y, z, w)
+
+    def _create_and_attach_cameras(self, body_names):
+        # prepare common camera properties
+        cam_props = gymapi.CameraProperties()
+        cam_props.width = int(self.cfg.camera.width)
+        cam_props.height = int(self.cfg.camera.height)
+        cam_props.horizontal_fov = float(self.cfg.camera.horizontal_fov)
+        cam_props.use_collision_geometry = False
+        cam_props.enable_tensors = False  # use CPU path by default for simplicity
+        # no global near/far in CameraProperties in all versions; set via camera sensor default
+        self.camera_props = cam_props
+
+        # find body index to attach to
+        target_body_name = getattr(self.cfg.camera, 'body_name', None)
+        if target_body_name is not None and target_body_name not in body_names:
+            if not self._camera_warned_missing_body:
+                print(f"[Camera] body_name '{target_body_name}' not found in asset bodies. Falling back to first body: '{body_names[0]}'")
+                self._camera_warned_missing_body = True
+            target_body_name = body_names[0]
+        if target_body_name is None:
+            target_body_name = body_names[0]
+
+        # local transform relative to body
+        px, py, pz = self.cfg.camera.position
+        r, p, y = self.cfg.camera.rpy
+        local_tf = gymapi.Transform()
+        local_tf.p = gymapi.Vec3(px, py, pz)
+        local_tf.r = self._quat_from_euler(r, p, y)
+
+        self.camera_handles = []
+        for i in range(self.num_envs):
+            env = self.envs[i]
+            cam_h = self.gym.create_camera_sensor(env, cam_props)
+            body_handle = self.gym.find_actor_rigid_body_handle(env, self.actor_handles[i], target_body_name)
+            if body_handle < 0:
+                # fall back to first body id 0
+                if not self._camera_warned_missing_body:
+                    print(f"[Camera] Could not find body '{target_body_name}'. Attaching to first body index 0.")
+                    self._camera_warned_missing_body = True
+                body_handle = 0
+            self.gym.attach_camera_to_body(cam_h, env, body_handle, local_tf, gymapi.FOLLOW_TRANSFORM)
+            self.camera_handles.append(cam_h)
+        self._camera_initialized = True
+        
+        # Store camera body info for visualization
+        self._camera_body_name = target_body_name
+
+    def visualize_camera_position(self):
+        """Draw camera position and viewing direction in the viewer.
+        Call this after creating the environment to see where the camera is mounted.
+        """
+        if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
+            print("[Camera] Camera not initialized, cannot visualize")
+            return
+        
+        from isaacgym import gymutil
+        
+        # Get camera configuration
+        px, py, pz = self.cfg.camera.position
+        r, p, yaw = self.cfg.camera.rpy
+        
+        # Draw for first few environments only (to avoid clutter)
+        num_envs_to_draw = min(4, self.num_envs)
+        
+        for i in range(num_envs_to_draw):
+            env = self.envs[i]
+            actor = self.actor_handles[i]
+            
+            # Get body transform
+            body_handle = self.gym.find_actor_rigid_body_handle(env, actor, self._camera_body_name)
+            if body_handle < 0:
+                body_handle = 0
+            
+            body_state = self.gym.get_actor_rigid_body_states(env, actor, gymapi.STATE_POS)
+            body_pos = body_state['pose']['p'][body_handle]
+            body_rot = body_state['pose']['r'][body_handle]
+            
+            # Convert body quaternion to rotation matrix to get body orientation
+            import math
+            from isaacgym import gymapi
+            
+            # Camera position in world frame = body_pos + rotate(camera_local_pos by body_rot)
+            # Simplified: just use body position + offset for visualization
+            cam_world_x = body_pos[0] + px
+            cam_world_y = body_pos[1] + py
+            cam_world_z = body_pos[2] + pz
+            
+            # Draw camera origin as a sphere
+            sphere_geom = gymutil.WireframeSphereGeometry(0.03, 8, 8, None, color=(1, 0, 0))
+            sphere_pose = gymapi.Transform()
+            sphere_pose.p = gymapi.Vec3(cam_world_x, cam_world_y, cam_world_z)
+            gymutil.draw_lines(sphere_geom, self.gym, self.viewer, env, sphere_pose)
+            
+            # Draw camera viewing direction (forward axis, adjusted by pitch)
+            # Camera forward in local frame after pitch rotation
+            forward_length = 0.3
+            # Simplified: pitch down means looking in +X and -Z direction
+            forward_x = forward_length * math.cos(p)
+            forward_z = -forward_length * math.sin(p)
+            
+            # Draw forward direction line (red)
+            line_verts = [
+                [cam_world_x, cam_world_y, cam_world_z],
+                [cam_world_x + forward_x, cam_world_y, cam_world_z + forward_z]
+            ]
+            line_colors = [[1, 0, 0], [1, 0, 0]]
+            self.gym.add_lines(self.viewer, env, 1, line_verts, line_colors)
+            
+            # Draw side indicators (green for left/right)
+            side_length = 0.15
+            line_verts = [
+                [cam_world_x, cam_world_y - side_length, cam_world_z],
+                [cam_world_x, cam_world_y + side_length, cam_world_z]
+            ]
+            line_colors = [[0, 1, 0], [0, 1, 0]]
+            self.gym.add_lines(self.viewer, env, 1, line_verts, line_colors)
+            
+            # Draw up indicator (blue)
+            line_verts = [
+                [cam_world_x, cam_world_y, cam_world_z],
+                [cam_world_x, cam_world_y, cam_world_z + 0.15]
+            ]
+            line_colors = [[0, 0, 1], [0, 0, 1]]
+            self.gym.add_lines(self.viewer, env, 1, line_verts, line_colors)
+
+    def get_camera_depth_images(self, as_torch: bool = True):
+        """Render and return stacked depth images from all env cameras.
+        Returns a tensor/ndarray of shape (num_envs, H, W). Depth is in meters; far plane returns -inf or large values depending on Gym version.
+        """
+        if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
+            raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
+
+        # ensure graphics are stepped and sensors rendered
+        self.gym.step_graphics(self.sim)
+        self.gym.render_all_camera_sensors(self.sim)
+
+        imgs = []
+        for i in range(self.num_envs):
+            depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+            # Isaac Gym returns a 2D array (H, W) float32
+            imgs.append(depth)
+        import numpy as _np
+        arr = _np.stack(imgs, axis=0)
+        if as_torch:
+            import torch as _torch
+            return _torch.from_numpy(arr)
+        return arr
 
     def _get_env_origins(self):
         """ Sets environment origins. On rough terrain the origins are defined by the terrain platforms.

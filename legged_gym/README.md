@@ -65,6 +65,37 @@ Paper: https://arxiv.org/abs/2109.11978
     - By default, the loaded policy is the last model of the last run of the experiment folder.
     - Other runs/model iteration can be selected by setting `load_run` and `checkpoint` in the train config.
 
+### Depth camera on the robot (Isaac Gym) ###
+You can attach a depth camera to the robot and fetch images at runtime.
+
+- Enable and configure the camera in your env config (programmatically):
+    - Set `env_cfg.camera.enable = True`
+    - Optionally set `env_cfg.camera.body_name` to a link to attach the camera to (e.g., `"trunk"` for A1, `"base"` or `"base_link"` depending on the URDF)
+    - Adjust `env_cfg.camera.position` and `env_cfg.camera.rpy` for the local pose relative to that link.
+
+- Use the provided demo to try it quickly:
+    ```
+    python legged_gym/scripts/camera_demo.py --task=a1
+    ```
+    This will step the env shortly, grab a stacked depth array `(num_envs, H, W)`, and save `camera_outputs/depth_env0.png`.
+
+    For your Sirius robot:
+    ```
+    python legged_gym/scripts/camera_demo.py --task=sirius
+    ```
+    The default mount is on the `trunk` link; adjust `env_cfg.camera.position/rpy` if needed.
+
+- From your code, after creating the env with camera enabled, call:
+    ```python
+    depth = env.get_camera_depth_images()  # torch tensor (N, H, W)
+    # or CPU numpy
+    depth_np = env.get_camera_depth_images(as_torch=False)
+    ```
+
+Notes:
+- Depth units are meters. Pixels with no hit may contain very large values or `-inf` depending on Isaac Gym version.
+- For performance with many envs, keep the resolution small (e.g., 160x120) and render on-demand only when needed.
+
 ### Adding a new environment ###
 The base environment `legged_robot` implements a rough terrain locomotion task. The corresponding cfg does not specify a robot asset (URDF/ MJCF) and has no reward scales. 
 

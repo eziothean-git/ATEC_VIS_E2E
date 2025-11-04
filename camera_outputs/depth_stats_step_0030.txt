@@ -1,0 +1,128 @@
+Depth Camera Statistics - Step 30
+============================================================
+
+Configuration:
+  Resolution: 320 x 240
+  Camera position: [0.45, 0.0, -0.03]
+  Camera orientation (RPY): [0.0, 0.6, 0.0]
+  FOV: 90.0 degrees
+
+Data Shape: (4, 240, 320)
+  - Number of environments: 4
+  - Image height: 240
+  - Image width: 320
+  - Total pixels per env: 76800
+
+Environment 0:
+  Valid pixels: 73847 / 76800 (96.2%)
+  Depth range: [0.0095, 181.7796] m
+  Mean depth: 1.4423 m
+  Median depth: 0.4249 m
+  Std deviation: 6.2793 m
+  Percentiles:
+    10%: 0.2343 m
+    25%: 0.2829 m
+    50%: 0.4249 m
+    75%: 0.8480 m
+    90%: 2.1230 m
+  Depth distribution:
+    0.0-0.2m: 5134 pixels (7.0%) - Very close (robot body)
+    0.2-0.5m: 37105 pixels (50.2%) - Close (ground)
+    0.5-1.0m: 16015 pixels (21.7%) - Near
+    1.0-2.0m: 7723 pixels (10.5%) - Medium
+    2.0-5.0m: 4816 pixels (6.5%) - Far
+    >5.0m:    3054 pixels (4.1%) - Very far
+
+  Center region samples (5x5 around center pixel [120, 160]):
+     0.480  0.480  0.480  0.480  0.480
+     0.476  0.476  0.476  0.476  0.476
+     0.471  0.471  0.471  0.471  0.471
+     0.467  0.467  0.467  0.467  0.467
+     0.463  0.463  0.387  0.363  0.463
+
+Environment 1:
+  Valid pixels: 73860 / 76800 (96.2%)
+  Depth range: [0.0105, 211.6241] m
+  Mean depth: 1.4979 m
+  Median depth: 0.4188 m
+  Std deviation: 7.1506 m
+  Percentiles:
+    10%: 0.2298 m
+    25%: 0.2777 m
+    50%: 0.4188 m
+    75%: 0.8301 m
+    90%: 2.1525 m
+  Depth distribution:
+    0.0-0.2m: 5131 pixels (6.9%) - Very close (robot body)
+    0.2-0.5m: 37715 pixels (51.1%) - Close (ground)
+    0.5-1.0m: 15720 pixels (21.3%) - Near
+    1.0-2.0m: 7332 pixels (9.9%) - Medium
+    2.0-5.0m: 4915 pixels (6.7%) - Far
+    >5.0m:    3047 pixels (4.1%) - Very far
+
+  Center region samples (5x5 around center pixel [120, 160]):
+     0.471  0.471  0.471  0.471  0.471
+     0.466  0.466  0.466  0.466  0.466
+     0.462  0.462  0.462  0.462  0.462
+     0.458  0.458  0.458  0.458  0.458
+     0.454  0.454  0.454  0.402  0.368
+
+Environment 2:
+  Valid pixels: 73814 / 76800 (96.1%)
+  Depth range: [0.0066, 211.5380] m
+  Mean depth: 1.5479 m
+  Median depth: 0.4308 m
+  Std deviation: 7.0816 m
+  Percentiles:
+    10%: 0.2398 m
+    25%: 0.2894 m
+    50%: 0.4308 m
+    75%: 0.8658 m
+    90%: 2.2196 m
+  Depth distribution:
+    0.0-0.2m: 5030 pixels (6.8%) - Very close (robot body)
+    0.2-0.5m: 36494 pixels (49.4%) - Close (ground)
+    0.5-1.0m: 16441 pixels (22.3%) - Near
+    1.0-2.0m: 7619 pixels (10.3%) - Medium
+    2.0-5.0m: 4955 pixels (6.7%) - Far
+    >5.0m:    3275 pixels (4.4%) - Very far
+
+  Center region samples (5x5 around center pixel [120, 160]):
+     0.490  0.490  0.053  0.053  0.490
+     0.486  0.486  0.053  0.053  0.486
+     0.481  0.481  0.053  0.053  0.481
+     0.477  0.369  0.054  0.054  0.477
+     0.054  0.054  0.054  0.054  0.054
+
+Environment 3:
+  Valid pixels: 73704 / 76800 (96.0%)
+  Depth range: [0.0089, 193.3165] m
+  Mean depth: 1.4967 m
+  Median depth: 0.4264 m
+  Std deviation: 6.6026 m
+  Percentiles:
+    10%: 0.2364 m
+    25%: 0.2853 m
+    50%: 0.4264 m
+    75%: 0.8509 m
+    90%: 2.1898 m
+  Depth distribution:
+    0.0-0.2m: 5112 pixels (6.9%) - Very close (robot body)
+    0.2-0.5m: 36837 pixels (50.0%) - Close (ground)
+    0.5-1.0m: 16177 pixels (21.9%) - Near
+    1.0-2.0m: 7526 pixels (10.2%) - Medium
+    2.0-5.0m: 4873 pixels (6.6%) - Far
+    >5.0m:    3179 pixels (4.3%) - Very far
+
+  Center region samples (5x5 around center pixel [120, 160]):
+     0.484  0.484  0.484  0.484  0.484
+     0.480  0.480  0.480  0.480  0.480
+     0.476  0.476  0.476  0.476  0.476
+     0.471  0.471  0.471  0.471  0.471
+     0.467  0.467  0.377  0.346  0.467
+
+
+File paths:
+  Raw depth (original): depth_raw_step_0030.npy
+  Absolute depth: depth_abs_step_0030.npy
+  Visualization: depth_step_0030.png
