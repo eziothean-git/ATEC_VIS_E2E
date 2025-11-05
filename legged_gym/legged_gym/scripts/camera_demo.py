@@ -237,7 +237,7 @@ def run(args):
 
 
 if __name__ == '__main__':
-    args = get_args()
+    args = get_args() 
     # You can pass --task a1 or other registered tasks
     # Optionally add --camera_body trunk/base/base_link by extending get_args in utils if needed
     run(args)

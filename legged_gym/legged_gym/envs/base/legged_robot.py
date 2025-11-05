@@ -789,43 +789,34 @@ class LeggedRobot(BaseTask):
         
         # Draw for first few environments only (to avoid clutter)
         num_envs_to_draw = min(4, self.num_envs)
-        
+        # Use tensor API (compatible with GPU pipeline) to get base/root positions
+        # Refresh root state tensor and read base positions instead of calling
+        # get_actor_rigid_body_states which is incompatible with GPU pipeline
+        self.gym.refresh_actor_root_state_tensor(self.sim)
+        root_positions = self.root_states[:, :3].cpu().numpy()  # (N, 3)
+
+        import math
         for i in range(num_envs_to_draw):
             env = self.envs[i]
-            actor = self.actor_handles[i]
-            
-            # Get body transform
-            body_handle = self.gym.find_actor_rigid_body_handle(env, actor, self._camera_body_name)
-            if body_handle < 0:
-                body_handle = 0
-            
-            body_state = self.gym.get_actor_rigid_body_states(env, actor, gymapi.STATE_POS)
-            body_pos = body_state['pose']['p'][body_handle]
-            body_rot = body_state['pose']['r'][body_handle]
-            
-            # Convert body quaternion to rotation matrix to get body orientation
-            import math
-            from isaacgym import gymapi
-            
-            # Camera position in world frame = body_pos + rotate(camera_local_pos by body_rot)
-            # Simplified: just use body position + offset for visualization
-            cam_world_x = body_pos[0] + px
-            cam_world_y = body_pos[1] + py
-            cam_world_z = body_pos[2] + pz
-            
+
+            base_x, base_y, base_z = root_positions[i]
+
+            # Camera position in world frame (approx): base position + configured local offset
+            cam_world_x = float(base_x) + px
+            cam_world_y = float(base_y) + py
+            cam_world_z = float(base_z) + pz
+
             # Draw camera origin as a sphere
-            sphere_geom = gymutil.WireframeSphereGeometry(0.03, 8, 8, None, color=(1, 0, 0))
+            sphere_geom = gymutil.WireframeSphereGeometry(0.05, 12, 12, None, color=(1, 0, 0))
             sphere_pose = gymapi.Transform()
             sphere_pose.p = gymapi.Vec3(cam_world_x, cam_world_y, cam_world_z)
             gymutil.draw_lines(sphere_geom, self.gym, self.viewer, env, sphere_pose)
-            
+
             # Draw camera viewing direction (forward axis, adjusted by pitch)
-            # Camera forward in local frame after pitch rotation
-            forward_length = 0.3
-            # Simplified: pitch down means looking in +X and -Z direction
+            forward_length = 0.4
             forward_x = forward_length * math.cos(p)
             forward_z = -forward_length * math.sin(p)
-            
+
             # Draw forward direction line (red)
             line_verts = [
                 [cam_world_x, cam_world_y, cam_world_z],
@@ -833,7 +824,7 @@ class LeggedRobot(BaseTask):
             ]
             line_colors = [[1, 0, 0], [1, 0, 0]]
             self.gym.add_lines(self.viewer, env, 1, line_verts, line_colors)
-            
+
             # Draw side indicators (green for left/right)
             side_length = 0.15
             line_verts = [
@@ -842,7 +833,7 @@ class LeggedRobot(BaseTask):
             ]
             line_colors = [[0, 1, 0], [0, 1, 0]]
             self.gym.add_lines(self.viewer, env, 1, line_verts, line_colors)
-            
+
             # Draw up indicator (blue)
             line_verts = [
                 [cam_world_x, cam_world_y, cam_world_z],
