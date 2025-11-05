@@ -17,3 +17,7 @@ Notes & next steps:
 Commit: fix(camera): use tensor API in visualize_camera_position to avoid GPU pipeline get_actor_rigid_body_states
 
 If you want the precise body-level position fix, reply and I'll implement retrieving rigid body state tensor mapping to actor/body indices.
+
+- Fix: Auto-linearize renderer depth (NDC or view-space z) to meters, preserve hit-mask, add CLI flags for debug outputs and mask-in-obs.
+  - Files changed: `legged_gym/legged_gym/envs/base/legged_robot.py`, `legged_gym/legged_gym/envs/sirius_diff_vis/sirius_joystick.py`, `legged_gym/legged_gym/utils/helpers.py`, `legged_gym/legged_gym/scripts/train.py`
+  - How to reproduce: run train with `--camera_enable --camera_test_mode --camera_debug_outputs`.

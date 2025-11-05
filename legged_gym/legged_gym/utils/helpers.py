@@ -131,6 +131,32 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         # num envs
         if args.num_envs is not None:
             env_cfg.env.num_envs = args.num_envs
+        # optional camera overrides
+        if hasattr(args, 'camera_enable') and args.camera_enable:
+            try:
+                env_cfg.camera.enable = True
+            except Exception:
+                pass
+        if hasattr(args, 'camera_display_interval_steps') and args.camera_display_interval_steps is not None:
+            try:
+                env_cfg.camera.display_interval_steps = args.camera_display_interval_steps
+            except Exception:
+                pass
+        if hasattr(args, 'camera_window_name') and args.camera_window_name is not None:
+            try:
+                env_cfg.camera.display_window_name = args.camera_window_name
+            except Exception:
+                pass
+        if hasattr(args, 'camera_max_depth') and args.camera_max_depth is not None:
+            try:
+                env_cfg.camera.max_depth = args.camera_max_depth
+            except Exception:
+                pass
+        if hasattr(args, 'camera_max_envs') and args.camera_max_envs is not None:
+            try:
+                env_cfg.camera.max_envs = args.camera_max_envs
+            except Exception:
+                pass
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -166,6 +192,14 @@ def get_args():
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
         {"name": "--model_path", "type": str, "help": "The path to the model to be exported as JIT model."},
+    ]
+    # camera control from CLI (optional)
+    custom_parameters += [
+        {"name": "--camera_enable", "action": "store_true", "default": False, "help": "Enable onboard camera during training (overrides cfg)."},
+        {"name": "--camera_display_interval_steps", "type": int, "help": "How many sim steps between OpenCV display updates."},
+        {"name": "--camera_window_name", "type": str, "help": "OpenCV window name for camera display."},
+        {"name": "--camera_max_depth", "type": float, "help": "Max depth (meters) to clip camera depth values."},
+        {"name": "--camera_max_envs", "type": int, "help": "Maximum number of envs for which to create onboard cameras (<=0 or omitted = all)."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(

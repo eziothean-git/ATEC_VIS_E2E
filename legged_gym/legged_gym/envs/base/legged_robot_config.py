@@ -193,6 +193,13 @@ class LeggedRobotCfg(BaseConfig):
         near_plane = 0.05           # [m]
         far_plane = 10.0            # [m]
         capture_on_demand = True    # if True, camera images are only rendered when explicitly requested via env.get_camera_depth_images()
+    # display and resource controls
+    display_interval_steps = 3  # how many sim steps between OpenCV display updates when enabled
+    display_window_name = 'env_cameras'
+    max_depth = 10.0            # clipping value for -inf/far plane replacement
+    # When running many envs, creating cameras for every env can be expensive or crash; create cameras for at most this many envs.
+    # Set to None or <=0 to create for all envs.
+    max_envs = 1
 
     class sim:
         dt =  0.005

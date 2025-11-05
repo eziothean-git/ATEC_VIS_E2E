@@ -41,6 +41,10 @@ from isaacgym.torch_utils import *
 import torch
 from torch import Tensor
 from typing import Tuple, Dict
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
@@ -137,6 +141,14 @@ class LeggedRobot(BaseTask):
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
+
+        # update camera display at a lower rate when running with a viewer
+        if not self.headless and getattr(self, '_camera_initialized', False):
+            try:
+                self._maybe_update_camera_display()
+            except Exception:
+                # be robust to any display errors
+                pass
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
@@ -629,6 +641,9 @@ class LeggedRobot(BaseTask):
         asset_path = self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
         asset_root = os.path.dirname(asset_path)
         asset_file = os.path.basename(asset_path)
+        # debug: print resolved asset path when camera is enabled to help diagnose body name mismatches
+        if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable:
+            print(f"[Camera Debug] Resolved asset path: {asset_path}")
 
         asset_options = gymapi.AssetOptions()
         asset_options.default_dof_drive_mode = self.cfg.asset.default_dof_drive_mode
@@ -756,7 +771,17 @@ class LeggedRobot(BaseTask):
         local_tf.r = self._quat_from_euler(r, p, y)
 
         self.camera_handles = []
-        for i in range(self.num_envs):
+        # determine how many envs to create cameras for (limit for resource reasons)
+        max_envs_cfg = getattr(self.cfg.camera, 'max_envs', None)
+        if max_envs_cfg is None or max_envs_cfg <= 0:
+            num_cameras_to_create = self.num_envs
+        else:
+            num_cameras_to_create = min(self.num_envs, int(max_envs_cfg))
+
+        # remember which env indices have cameras
+        self._camera_env_indices = list(range(num_cameras_to_create))
+
+        for i in self._camera_env_indices:
             env = self.envs[i]
             cam_h = self.gym.create_camera_sensor(env, cam_props)
             body_handle = self.gym.find_actor_rigid_body_handle(env, self.actor_handles[i], target_body_name)
@@ -768,10 +793,16 @@ class LeggedRobot(BaseTask):
                 body_handle = 0
             self.gym.attach_camera_to_body(cam_h, env, body_handle, local_tf, gymapi.FOLLOW_TRANSFORM)
             self.camera_handles.append(cam_h)
-        self._camera_initialized = True
-        
+
+        # mark initialized if we created at least one camera
+        self._camera_initialized = len(self.camera_handles) > 0
+
         # Store camera body info for visualization
         self._camera_body_name = target_body_name
+        # display settings for optional visualization window
+        self.camera_display_interval_steps = int(getattr(self.cfg.camera, 'display_interval_steps', 3))
+        self._camera_display_counter = 0
+        self._camera_display_window_name = getattr(self.cfg.camera, 'display_window_name', 'env_cameras')
 
     def visualize_camera_position(self):
         """Draw camera position and viewing direction in the viewer.
@@ -846,6 +877,7 @@ class LeggedRobot(BaseTask):
         """Render and return stacked depth images from all env cameras.
         Returns a tensor/ndarray of shape (num_envs, H, W). Depth is in meters; far plane returns -inf or large values depending on Gym version.
         """
+        # Backwards-compatible wrapper: normalized, clipped and optionally returned on a torch device.
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
 
@@ -853,17 +885,114 @@ class LeggedRobot(BaseTask):
         self.gym.step_graphics(self.sim)
         self.gym.render_all_camera_sensors(self.sim)
 
-        imgs = []
-        for i in range(self.num_envs):
-            depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-            # Isaac Gym returns a 2D array (H, W) float32
-            imgs.append(depth)
         import numpy as _np
+        imgs = []
+
+        # depth shape expected (H, W)
+        H = int(self.camera_props.height)
+        W = int(self.camera_props.width)
+        max_depth = float(getattr(self.cfg.camera, 'max_depth', getattr(self.cfg.camera, 'far_plane', 10.0)))
+
+        # iterate through all envs; if we didn't create a camera for some env, return a placeholder depth (max_depth)
+        created = len(getattr(self, 'camera_handles', []))
+        for i in range(self.num_envs):
+            if i < created:
+                depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                imgs.append(depth.astype('float32'))
+            else:
+                # placeholder: far plane (max depth)
+                imgs.append(_np.full((H, W), max_depth, dtype='float32'))
+
+        arr = _np.stack(imgs, axis=0)
+        # replace -inf with max_depth and clip
+        arr[_np.isneginf(arr)] = max_depth
+        arr = _np.clip(arr, 0.0, max_depth)
+
+        if as_torch:
+            import torch as _torch
+            t = _torch.from_numpy(arr).to(torch.get_default_dtype())
+            # put on device used by the environment (useful for policy observations)
+            try:
+                device = self.device if hasattr(self, 'device') else 'cpu'
+                t = t.to(device)
+            except Exception:
+                pass
+            return t
+        return arr
+
+    def get_camera_rgb_images(self, as_torch: bool = False, to_bgr: bool = True):
+        """Render and return stacked RGB images from all env cameras.
+        Returns array/tensor of shape (num_envs, H, W, 3) in RGB order by default. If to_bgr=True and returning numpy, converts to BGR for OpenCV display.
+        """
+        if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
+            raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
+
+        self.gym.step_graphics(self.sim)
+        self.gym.render_all_camera_sensors(self.sim)
+        imgs = []
+        import numpy as _np
+
+        H = int(self.camera_props.height)
+        W = int(self.camera_props.width)
+        created = len(getattr(self, 'camera_handles', []))
+        for i in range(self.num_envs):
+            if i < created:
+                img = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_COLOR)
+                # usually returns HxWx4 (RGBA) or HxWx3
+                img = img[:, :, :3].astype('uint8')
+                imgs.append(img)
+            else:
+                imgs.append(_np.zeros((H, W, 3), dtype='uint8'))
+
         arr = _np.stack(imgs, axis=0)
         if as_torch:
             import torch as _torch
-            return _torch.from_numpy(arr)
+            t = _torch.from_numpy(arr).permute(0, 3, 1, 2).float() / 255.0
+            try:
+                device = self.device if hasattr(self, 'device') else 'cpu'
+                t = t.to(device)
+            except Exception:
+                pass
+            return t
+        if to_bgr and cv2 is not None:
+            # convert RGB to BGR for display
+            arr = arr[:, :, :, ::-1]
         return arr
+
+    def _maybe_update_camera_display(self):
+        """Called each step to optionally update an OpenCV window showing camera images at a lower rate.
+        This is lightweight and optional (requires opencv)."""
+        # Only display when running with a viewer
+        if self.headless or not getattr(self, '_camera_initialized', False) or cv2 is None:
+            return
+        # require viewer and viewer sync
+        if not (hasattr(self, 'viewer') and self.viewer is not None and self.enable_viewer_sync):
+            return
+
+        self._camera_display_counter = (self._camera_display_counter + 1) % max(1, self.camera_display_interval_steps)
+        if self._camera_display_counter != 0:
+            return
+
+        # get RGB from cameras (numpy uint8)
+        try:
+            imgs = self.get_camera_rgb_images(as_torch=False, to_bgr=True)
+        except Exception:
+            return
+
+        # choose first created camera if available, otherwise nothing to show
+        if len(imgs) == 0:
+            return
+        img = imgs[0]
+        # resize for display if too large
+        max_width = 960
+        h, w = img.shape[:2]
+        if w > max_width:
+            scale = max_width / w
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
+
+        cv2.imshow(self._camera_display_window_name, img)
+        # small wait to process window events
+        cv2.waitKey(1)
 
     def _get_env_origins(self):
         """ Sets environment origins. On rough terrain the origins are defined by the terrain platforms.

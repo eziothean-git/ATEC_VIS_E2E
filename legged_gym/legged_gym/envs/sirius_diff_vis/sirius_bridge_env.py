@@ -103,6 +103,16 @@ class SiriusTwoSpanBridgeCfg(SiriusFlatCfg):
         dynamic_friction = 1.0
         restitution = 0.0
 
+    # Enable camera for visualization in this diff_vis task by default
+    class camera(SiriusFlatCfg.camera):
+        enable = True
+        # display every 3 simulation steps (this is in sim steps, not seconds)
+        display_interval_steps = 3
+        # window name shown by OpenCV
+        display_window_name = "sirius_diff_vis_cam"
+        # max depth clipping for normalized depth interface (meters)
+        max_depth = 10.0
+
 
 class SiriusTwoSpanBridgeCfgPPO(LeggedRobotCfgPPO):
     """PPO 配置，先给一个比较常规的结构，后面可以再细调。"""

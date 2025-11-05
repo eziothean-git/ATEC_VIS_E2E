@@ -51,6 +51,13 @@ variant branch and merging guidance. Do not open pull requests that directly mer
 experimental artifacts (large models, training logs, etc.) into `master` without
 explicit review and cleanup.
 
+Repository remote (for pushing changes):
+
+- Remote URL: https://github.com/eziothean-git/ATEC_VIS_E2E
+- Default branch for experimental work: `variant/e2e-rl`
+
+When making changes, commit on `variant/e2e-rl` and push to the `origin` remote above. If you have forked the repo, push to your fork instead and open a PR to this repo when ready.
+
 
 ## 1. RL training
 
@@ -272,3 +279,5 @@ This repository is built upon the support and contributions of the following ope
 - [mujoco](https://github.com/google-deepmind/mujoco.git)
 - [lcm](https://github.com/lcm-proj/lcm)
 - [iceoryx](https://github.com/eclipse-iceoryx/iceoryx/tree/main)
+
+See docs/CAMERA_FIX.md for details about the camera depth fixes and usage.

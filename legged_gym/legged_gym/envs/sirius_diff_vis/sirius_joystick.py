@@ -41,6 +41,10 @@ import math
 import torch
 from torch import Tensor
 from typing import Tuple, Dict
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
@@ -141,6 +145,13 @@ class SiriusJoyFlat(BaseTask):
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
+
+        # update camera display at a lower rate when running with a viewer
+        if not self.headless and getattr(self, '_camera_initialized', False):
+            try:
+                self._maybe_update_camera_display()
+            except Exception:
+                pass
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
@@ -686,13 +697,83 @@ class SiriusJoyFlat(BaseTask):
         imgs = []
         for i in range(self.num_envs):
             depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-            imgs.append(depth)
+            imgs.append(depth.astype('float32'))
+        import numpy as _np
+        arr = _np.stack(imgs, axis=0)
+
+        # replace -inf with max_depth and clip
+        max_depth = float(getattr(self.cfg.camera, 'max_depth', 10.0))
+        arr[_np.isneginf(arr)] = max_depth
+        arr = _np.clip(arr, 0.0, max_depth)
+
+        if as_torch:
+            import torch as _torch
+            t = _torch.from_numpy(arr).to(torch.get_default_dtype())
+            try:
+                device = self.device if hasattr(self, 'device') else 'cpu'
+                t = t.to(device)
+            except Exception:
+                pass
+            return t
+        return arr
+
+    def get_camera_rgb_images(self, as_torch: bool = False, to_bgr: bool = True):
+        """Render and return stacked RGB images from all env cameras.
+        Returns array/tensor of shape (num_envs, H, W, 3) in RGB order by default. If to_bgr=True and returning numpy, converts to BGR for OpenCV display.
+        """
+        if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
+            raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
+
+        self.gym.step_graphics(self.sim)
+        self.gym.render_all_camera_sensors(self.sim)
+        imgs = []
+        for i in range(self.num_envs):
+            img = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_COLOR)
+            img = img[:, :, :3].astype('uint8')
+            imgs.append(img)
         import numpy as _np
         arr = _np.stack(imgs, axis=0)
         if as_torch:
             import torch as _torch
-            return _torch.from_numpy(arr)
+            t = _torch.from_numpy(arr).permute(0, 3, 1, 2).float() / 255.0
+            try:
+                device = self.device if hasattr(self, 'device') else 'cpu'
+                t = t.to(device)
+            except Exception:
+                pass
+            return t
+        if to_bgr and cv2 is not None:
+            arr = arr[:, :, :, ::-1]
         return arr
+
+    def _maybe_update_camera_display(self):
+        """Optionally opens an OpenCV window and displays the first env camera at a lower rate."""
+        if self.headless or not getattr(self, '_camera_initialized', False) or cv2 is None:
+            return
+        if not (hasattr(self, 'viewer') and self.viewer is not None and self.enable_viewer_sync):
+            return
+        # set up counters on first use
+        if not hasattr(self, '_camera_display_counter'):
+            self._camera_display_counter = 0
+            self.camera_display_interval_steps = int(getattr(self.cfg.camera, 'display_interval_steps', 3))
+            self._camera_display_window_name = getattr(self.cfg.camera, 'display_window_name', 'env_cameras')
+
+        self._camera_display_counter = (self._camera_display_counter + 1) % max(1, self.camera_display_interval_steps)
+        if self._camera_display_counter != 0:
+            return
+
+        try:
+            imgs = self.get_camera_rgb_images(as_torch=False, to_bgr=True)
+        except Exception:
+            return
+        img = imgs[0]
+        max_width = 960
+        h, w = img.shape[:2]
+        if w > max_width:
+            scale = max_width / w
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
+        cv2.imshow(self._camera_display_window_name, img)
+        cv2.waitKey(1)
 
     def visualize_camera_position(self):
         """Draw camera position and viewing direction in the viewer.
@@ -949,6 +1030,9 @@ class SiriusJoyFlat(BaseTask):
         asset_path = self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
         asset_root = os.path.dirname(asset_path)
         asset_file = os.path.basename(asset_path)
+        # debug: print resolved asset path when camera is enabled to diagnose body name mismatches
+        if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable:
+            print(f"[Camera Debug] Resolved asset path (sirius_joystick): {asset_path}")
 
         asset_options = gymapi.AssetOptions()
         asset_options.default_dof_drive_mode = self.cfg.asset.default_dof_drive_mode
@@ -973,6 +1057,12 @@ class SiriusJoyFlat(BaseTask):
 
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(robot_asset)
+        # debug: print a short list of body names when camera is enabled
+        if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable:
+            try:
+                print(f"[Camera Debug] Loaded asset body names (first 50): {body_names[:50]}")
+            except Exception:
+                print(f"[Camera Debug] Loaded asset has {len(body_names)} bodies")
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)

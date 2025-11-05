@@ -97,6 +97,12 @@ class TaskRegistry():
         # parse sim params (convert to dict first)
         sim_params = {"sim": class_to_dict(env_cfg.sim)}
         sim_params = parse_sim_params(args, sim_params)
+        # debug: announce env creation and asset file
+        try:
+            asset_file_debug = env_cfg.asset.file
+        except Exception:
+            asset_file_debug = 'N/A'
+        print(f"[Camera Debug] Creating env '{name}' using asset: {asset_file_debug}")
         env = task_class(   cfg=env_cfg,
                             sim_params=sim_params,
                             physics_engine=args.physics_engine,

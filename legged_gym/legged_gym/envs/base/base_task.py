@@ -38,7 +38,9 @@ import torch
 class BaseTask():
 
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
+        print("[Camera Debug] Entering BaseTask.__init__")
         self.gym = gymapi.acquire_gym()
+        print("[Camera Debug] Acquired gym API instance")
 
         self.sim_params = sim_params
         self.physics_engine = physics_engine
