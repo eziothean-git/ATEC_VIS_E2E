@@ -115,3 +115,5 @@ isaacgym
 *.swp
 
 !deploy/iceoryx/**
+legged_gym/logs/sirius_two_span_bridge/
+legged_gym_blindrelease.zip
