@@ -42,6 +42,15 @@ The basic workflow for using reinforcement learning to achieve motion control is
 - **Sim2Sim in MuJoCo**: Validate the trained policy in MuJoCo to ensure it generalizes beyond the legged_gym.
 - **Sim2Real**: Deploy the policy to a physical robot to achieve motion control.
 
+## Branching policy
+
+All new experimental changes related to end-to-end reinforcement learning (E2E-RL)
+should be developed on the variant branch `variant/e2e-rl`. The `master` branch is
+reserved for the stable base framework. See `VARIANTS.md` for details about the
+variant branch and merging guidance. Do not open pull requests that directly merge
+experimental artifacts (large models, training logs, etc.) into `master` without
+explicit review and cleanup.
+
 
 ## 1. RL training
 
