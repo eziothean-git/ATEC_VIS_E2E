@@ -157,6 +157,26 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
                 env_cfg.camera.max_envs = args.camera_max_envs
             except Exception:
                 pass
+        if hasattr(args, 'camera_debug_outputs') and args.camera_debug_outputs:
+            try:
+                env_cfg.camera.debug_outputs = True
+            except Exception:
+                pass
+        if hasattr(args, 'camera_mask_fraction_in_obs') and args.camera_mask_fraction_in_obs:
+            try:
+                env_cfg.camera.include_mask_fraction_in_obs = True
+            except Exception:
+                pass
+        if hasattr(args, 'camera_test_mode') and args.camera_test_mode:
+            try:
+                env_cfg.camera.camera_test_mode = True
+            except Exception:
+                pass
+        if hasattr(args, 'camera_test_frames') and args.camera_test_frames is not None:
+            try:
+                env_cfg.camera.camera_test_frames = args.camera_test_frames
+            except Exception:
+                pass
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -200,6 +220,10 @@ def get_args():
         {"name": "--camera_window_name", "type": str, "help": "OpenCV window name for camera display."},
         {"name": "--camera_max_depth", "type": float, "help": "Max depth (meters) to clip camera depth values."},
         {"name": "--camera_max_envs", "type": int, "help": "Maximum number of envs for which to create onboard cameras (<=0 or omitted = all)."},
+        {"name": "--camera_debug_outputs", "action": "store_true", "default": False, "help": "Save renderer raw/linearized/mask outputs to disk for debugging."},
+        {"name": "--camera_mask_fraction_in_obs", "action": "store_true", "default": False, "help": "Append per-env fraction of valid depth pixels to observation vector."},
+        {"name": "--camera_test_mode", "action": "store_true", "default": False, "help": "Run in short camera test mode: capture N frames and exit (overrides training)."},
+        {"name": "--camera_test_frames", "type": int, "help": "Number of frames to capture in camera_test_mode."},
     ]
     # parse arguments
     args = gymutil.parse_arguments(
