@@ -61,6 +61,34 @@ When making changes, commit on `variant/e2e-rl` and push to the `origin` remote 
 
 ## 1. RL training
 
+### Vision E2E-RL variant (branch: `variant/e2e-rl_CNN`)
+
+We provide a vision-augmented Sirius task that ingests a depth image (87×58, single channel), encodes it into a 32-D latent, and concatenates with proprioception.
+
+Key tuning for single-GPU 16GB and 256 envs:
+- Camera: `obs_refresh_interval=2` (≈25 Hz), `enable_tensors=True`, `max_envs=num_envs=256` (no rotation), width×height=87×58
+- PPO: `learning_rate=2e-4`, `num_steps_per_env=32`, `num_learning_epochs=6`, `num_mini_batches=2`, `clip_param=0.15`, `entropy_coef=0.02`, `desired_kl=0.008`
+- Curriculum: small initial command ranges, `max_curriculum=0.6`, `curriculum_increment=0.01`, stricter progress gates
+- Rewards: stronger penalties for tipping/falls (orientation, base_height)
+- Network: lightweight CNN (16/32 channels + 64-d head → 32-D latent)
+
+References:
+- EMA metric explained: `EMA_EXPLAINED.md`
+- Hyperparameter scaling from 4096→256 envs: `HYPERPARAMETER_SCALING.md`
+- Before/after config comparison: `HYPERPARAMETER_COMPARISON.md`
+
+Train:
+
+```bash
+python legged_gym/scripts/train.py --task=sirius --headless
+```
+
+If learning dominates time, consider:
+- Reduce `num_learning_epochs` further (e.g., 5)
+- Increase `num_mini_batches` back to 4 (often better kernel utilization)
+- Make critic use only proprio (skip vision)
+- Lower camera rate: `obs_refresh_interval=3` (~16.7 Hz)
+
 ### 1.1 Train
 
 ```python
@@ -68,6 +96,32 @@ When making changes, commit on `variant/e2e-rl` and push to the `origin` remote 
 cd legged_gym
 python legged_gym/scripts/train.py --task=sirius --headless
 ```
+
+### 1.2 Staged Training Helper
+
+We provide `scripts/staged_train.py` to automate a two-stage curriculum:
+
+- Stage A trains on the flat `sirius` task.
+- Stage B resumes from the best Stage A checkpoint and continues on the `sirius_two_span_bridge` task.
+
+Key options:
+
+- `--stage_a_num_envs` / `--stage_b_num_envs`: override the env count per stage (defaults to `--num_envs`).
+- `--stage_a_headless`, `--stage_b_headless`: force individual stages to run headless.
+- `--stage_a_show`, `--stage_b_show`: ensure the Isaac Gym viewer stays visible for the chosen stage, even if global `--headless` is set.
+- `--dry_run`: print the resolved commands and exit without launching training.
+
+Example (headless Stage A, visible Stage B):
+
+```bash
+/home/USER/anaconda3/envs/sirius2/bin/python scripts/staged_train.py \
+    --stage_a_iters 800 --stage_b_iters 1200 \
+    --stage_a_num_envs 4096 --stage_b_num_envs 256 \
+    --stage_a_headless --stage_b_show \
+    --run_base mytest
+```
+
+> Note: the script forwards the current interpreter (`sys.executable`) to both stages. Run it from the environment that already has `numpy`, `torch`, and Isaac Gym installed (e.g. the `sirius2` Conda env above).
 
 ### 1.2 Play
 

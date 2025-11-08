@@ -66,15 +66,29 @@ class LeggedRobotCfg(BaseConfig):
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
 
     class commands:
-        curriculum = False
-        max_curriculum = 1.
+        # Enable a simple command curriculum: start with near-zero target velocities so the
+        # agent first learns to stand, then gradually expand target ranges.
+        curriculum = True
+        max_curriculum = 1.0
+        # small initial ranges encourage standing
         num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10. # time before command are changed[s]
         heading_command = True # if true: compute ang vel command from heading error
+        # curriculum parameters
+        # amount to expand each side when progressing (made conservative)
+        curriculum_increment = 0.02  # amount to expand each side when progressing
+        curriculum_progress_threshold = 0.8  # fraction of tracking reward to trigger increase
+        # additional, more conservative gating parameters
+        curriculum_consecutive_successes = 5  # require this many consecutive checks to pass before expanding
+        curriculum_min_resets_between_expansions = 20  # minimum number of reset-calls between successive expansions
+        curriculum_expand_percentile = 0.75  # use this percentile over envs instead of mean to decide progress
+        init_root_vel_range = 0.05  # initial random root velocity magnitude (m/s, rad/s)
+        # exponential moving average alpha used when using EMA-based curriculum
+        curriculum_ema_alpha = 0.2
         class ranges:
-            lin_vel_x = [-1.0, 1.0] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
-            ang_vel_yaw = [-1, 1]    # min max [rad/s]
+            lin_vel_x = [-0.05, 0.05] # min max [m/s] (start almost zero)
+            lin_vel_y = [-0.05, 0.05]   # min max [m/s]
+            ang_vel_yaw = [-0.1, 0.1]    # min max [rad/s]
             heading = [-3.14, 3.14]
 
     class init_state:

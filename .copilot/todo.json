@@ -1,0 +1,20 @@
+[
+		{
+			"id": 1,
+			"title": "Review existing docs",
+			"description": "Read README.md and CHANGELOG to locate sections needing updates",
+			"status": "completed"
+		},
+		{
+			"id": 2,
+			"title": "Update README",
+			"description": "Document staged_train.py features (stage-specific env counts and headless flags) and usage",
+				"status": "completed"
+		},
+	{
+		"id": 3,
+		"title": "Update changelog",
+		"description": "Add entry summarizing staged training script enhancements and policy config alignment",
+				"status": "completed"
+	}
+]

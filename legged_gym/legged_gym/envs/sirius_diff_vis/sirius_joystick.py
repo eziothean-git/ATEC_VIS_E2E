@@ -71,7 +71,7 @@ class SiriusJoyFlat(BaseTask):
         self.sim_params = sim_params
         self.height_samples = None
         # Disable debug visualization by default to improve performance when cameras are enabled.
-        self.debug_viz = False
+        self.debug_viz = bool(getattr(getattr(self.cfg, 'env', None), 'debug_viz', False))
         self.init_done = False
         self._parse_cfg(self.cfg)
         # initialize camera-related flags early (create_sim will call _create_envs)
@@ -83,6 +83,8 @@ class SiriusJoyFlat(BaseTask):
         # flag to avoid repeated warnings when target body is missing
         self._camera_warned_missing_body = False
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
+
+        self._configure_observation_layout()
 
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
@@ -146,13 +148,22 @@ class SiriusJoyFlat(BaseTask):
         ps['post_physics'] += t_post
         ps['steps'] += 1
 
-        # every N steps optionally print summary (cheap): choose N based on sim size
-        # Only print when explicitly enabled via cfg.camera.print_perf = True
-        if getattr(getattr(self.cfg, 'camera', None), 'print_perf', False):
-            if ps['steps'] % max(1, int(200 / max(1, self.num_envs))) == 0:
-                avg = {k: (v / ps['steps']) for k, v in ps.items() if k != 'steps'}
-                print(f"[Perf] num_envs={self.num_envs} avg_render={avg['render']:.6f}s avg_simulate={avg['simulate']:.6f}s avg_set_dof={avg['set_dof']:.6f}s avg_refresh={avg['refresh_dof']:.6f}s avg_post={avg['post_physics']:.6f}s steps={ps['steps']}")
-        self.post_physics_step()
+        # Print detailed performance stats periodically (every ~10 seconds worth of steps)
+        # In non-headless mode with rendering enabled, helps identify bottlenecks
+        if not self.headless and ps['steps'] % 500 == 0:
+            avg = {k: (v / ps['steps'] * 1000) for k, v in ps.items() if k not in ['steps', 'camera_count']}  # convert to ms
+            total_ms = sum(v for k, v in avg.items() if k != 'camera_fetch')
+            print(f"\n[Performance] num_envs={self.num_envs}, steps={ps['steps']}")
+            print(f"  render:       {avg['render']:6.2f}ms ({avg['render']/total_ms*100:5.1f}%)")
+            print(f"  simulate:     {avg['simulate']:6.2f}ms ({avg['simulate']/total_ms*100:5.1f}%)")
+            print(f"  set_dof:      {avg['set_dof']:6.2f}ms ({avg['set_dof']/total_ms*100:5.1f}%)")
+            print(f"  refresh_dof:  {avg['refresh_dof']:6.2f}ms ({avg['refresh_dof']/total_ms*100:5.1f}%)")
+            print(f"  post_physics: {avg['post_physics']:6.2f}ms ({avg['post_physics']/total_ms*100:5.1f}%)")
+            if 'camera_fetch' in avg:
+                cam_count = ps.get('camera_count', 1)
+                cam_avg = avg['camera_fetch'] / max(1, cam_count) * ps['steps']
+                print(f"  camera_fetch: {cam_avg:6.2f}ms (called {cam_count}x, {cam_avg/total_ms*100:5.1f}% amortized)")
+            print(f"  TOTAL:        {total_ms:6.2f}ms/step ({1000/total_ms:.1f} FPS)\n")
 
         # return clipped obs, clipped states (None), rewards, dones and infos
         clip_obs = self.cfg.normalization.clip_observations
@@ -223,8 +234,9 @@ class SiriusJoyFlat(BaseTask):
         # update curriculum
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
-        # avoid updating command curriculum at each step since the maximum command is common to all envs
-        if self.cfg.commands.curriculum and (self.common_step_counter % self.max_episode_length==0):
+        # update command curriculum whenever some envs are reset so EMA/avg_tracking
+        # are refreshed frequently and the shared command ranges can expand promptly.
+        if self.cfg.commands.curriculum:
             self.update_command_curriculum(env_ids)
         
         # reset robot states
@@ -249,6 +261,33 @@ class SiriusJoyFlat(BaseTask):
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+            # expose last avg tracking and EMA (if available)
+            if hasattr(self, 'last_avg_tracking'):
+                try:
+                    self.extras["episode"]["avg_tracking"] = float(self.last_avg_tracking)
+                except Exception:
+                    self.extras["episode"]["avg_tracking"] = 0.0
+            if hasattr(self, 'command_tracking_ema'):
+                try:
+                    self.extras["episode"]["command_tracking_ema"] = float(self.command_tracking_ema)
+                except Exception:
+                    self.extras["episode"]["command_tracking_ema"] = 0.0
+            # additional diagnostic fields for the new conservative curriculum gating
+            if hasattr(self, 'last_percentile'):
+                try:
+                    self.extras["episode"]["pval_tracking"] = float(self.last_percentile)
+                except Exception:
+                    self.extras["episode"]["pval_tracking"] = 0.0
+            if hasattr(self, 'curriculum_consec_ok_count'):
+                try:
+                    self.extras["episode"]["curriculum_consec_ok"] = int(self.curriculum_consec_ok_count)
+                except Exception:
+                    self.extras["episode"]["curriculum_consec_ok"] = 0
+            if hasattr(self, 'resets_since_last_expansion'):
+                try:
+                    self.extras["episode"]["resets_since_last_expansion"] = int(self.resets_since_last_expansion)
+                except Exception:
+                    self.extras["episode"]["resets_since_last_expansion"] = 0
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -271,23 +310,218 @@ class SiriusJoyFlat(BaseTask):
             rew = self._reward_termination() * self.reward_scales["termination"]
             self.rew_buf += rew
             self.episode_sums["termination"] += rew
+
+    def _configure_observation_layout(self):
+        """Pre-compute observation slicing for proprioceptive and depth inputs."""
+        total_obs = int(getattr(self.cfg.env, 'num_observations', self.obs_buf.shape[1]))
+        self._proprio_obs_dim = int(getattr(self.cfg.env, 'proprio_obs_dim', total_obs))
+        self._vision_flat_dim = max(total_obs - self._proprio_obs_dim, 0)
+        camera_cfg = getattr(self.cfg, 'camera', None)
+        self._vision_obs_enabled = (
+            self._vision_flat_dim > 0
+            and camera_cfg is not None
+            and bool(getattr(camera_cfg, 'enable', False))
+        )
+
+        if self._vision_obs_enabled:
+            self._depth_height = int(getattr(camera_cfg, 'height', 0))
+            self._depth_width = int(getattr(camera_cfg, 'width', 0))
+            expected_flat = self._depth_height * self._depth_width
+            if expected_flat != self._vision_flat_dim:
+                raise ValueError(
+                    f"Depth observation size mismatch: expected {expected_flat} elements from camera "
+                    f"(height={self._depth_height}, width={self._depth_width}), got {self._vision_flat_dim}."
+                )
+            self._max_depth = float(getattr(camera_cfg, 'max_depth', 5.0))
+            zeros_image = torch.zeros(
+                self.num_envs,
+                self._depth_height,
+                self._depth_width,
+                device=self.device,
+                dtype=self.obs_buf.dtype,
+            )
+            self._depth_zero_image = zeros_image
+            self._depth_zero_flat = zeros_image.view(self.num_envs, -1)
+        else:
+            self._depth_height = 0
+            self._depth_width = 0
+            self._max_depth = None
+            self._vision_flat_dim = 0
+            self._depth_zero_image = torch.zeros(
+                self.num_envs, 0, 0, device=self.device, dtype=self.obs_buf.dtype
+            )
+            self._depth_zero_flat = torch.zeros(
+                self.num_envs, 0, device=self.device, dtype=self.obs_buf.dtype
+            )
+        self._camera_warned_depth = False
+        self._latest_depth = None
+        self._latest_depth_flat = None
+        # Camera refresh control: only fetch new frames every N steps to reduce GPU overhead
+        self._camera_refresh_interval = int(getattr(camera_cfg, 'obs_refresh_interval', 3))
+        self._camera_step_counter = 0
+        
+        # Camera rotation: when max_envs < num_envs, rotate which envs get fresh camera data
+        self._camera_max_envs = int(getattr(camera_cfg, 'max_envs', self.num_envs))
+        if self._camera_max_envs < self.num_envs:
+            # 初始化轮转缓存：每个 env 都有独立的深度缓存
+            self._depth_cache = torch.zeros(
+                self.num_envs,
+                self._vision_flat_dim,
+                device=self.device,
+                dtype=self.obs_buf.dtype,
+            )
+            self._camera_rotation_offset = 0
+            print(f"[Camera] Rotation mode: {self._camera_max_envs} cameras for {self.num_envs} envs")
+        else:
+            self._depth_cache = None
+            self._camera_rotation_offset = 0
+
+    def _fetch_depth_observation(self) -> torch.Tensor:
+        """Fetch and normalize depth observations, returned as flattened tensors.
+        
+        When max_envs < num_envs, implements a rotation scheme:
+        - Each step, a different subset of envs gets fresh camera data
+        - Other envs use their cached depth from previous rotations
+        - Over time, all envs receive updated depth observations
+        """
+        if not self._vision_obs_enabled:
+            return self._depth_zero_flat
+
+        # Increment step counter
+        self._camera_step_counter += 1
+        
+        # Decide whether to fetch new frames
+        should_refresh = (self._camera_step_counter >= self._camera_refresh_interval)
+        
+        if not should_refresh:
+            # Return cached data
+            if self._depth_cache is not None:
+                return self._depth_cache
+            elif self._latest_depth_flat is not None:
+                return self._latest_depth_flat
+            else:
+                # First step, must fetch
+                pass
+        else:
+            # Reset counter
+            self._camera_step_counter = 0
+
+        try:
+            import time as _time
+            t_camera_start = _time.time()
+            depth = self.get_camera_depth_images(as_torch=True)
+            t_camera = _time.time() - t_camera_start
+            
+            # Track camera fetch time in perf stats
+            if 'camera_fetch' not in self._perf_stats:
+                self._perf_stats['camera_fetch'] = 0.0
+                self._perf_stats['camera_count'] = 0
+            self._perf_stats['camera_fetch'] += t_camera
+            self._perf_stats['camera_count'] += 1
+        except Exception as exc:
+            if not self._camera_warned_depth:
+                print(f"[Camera] depth capture failed, using zeros: {exc}")
+                self._camera_warned_depth = True
+            if self._depth_cache is not None:
+                return self._depth_cache
+            else:
+                return self._depth_zero_flat
+
+        # Validate shape
+        if depth.ndim != 3 or depth.shape[1] != self._depth_height or depth.shape[2] != self._depth_width:
+            if not self._camera_warned_depth:
+                print(
+                    f"[Camera] unexpected depth tensor shape {tuple(depth.shape)}; "
+                    f"expected (N, {self._depth_height}, {self._depth_width})."
+                )
+                self._camera_warned_depth = True
+            if self._depth_cache is not None:
+                return self._depth_cache
+            else:
+                return self._depth_zero_flat
+
+        # Normalize depth: [0, max_depth] -> [-0.5, 0.5]
+        depth = depth.nan_to_num(nan=self._max_depth, posinf=self._max_depth, neginf=0.0)
+        depth = depth.clamp_(0.0, self._max_depth)
+        depth = depth / self._max_depth - 0.5
+        depth = depth.clamp_(-0.5, 0.5)
+        depth = depth.to(self.obs_buf.dtype)
+        
+        depth_flat = depth.view(depth.shape[0], -1)  # (num_cameras, H*W)
+        
+        # Update cache with rotation if needed
+        if self._depth_cache is not None:
+            # Rotation mode: distribute fresh camera data across all envs
+            num_cameras = depth_flat.shape[0]
+            if num_cameras < self.num_envs:
+                # 计算本次更新哪些 env
+                start_idx = self._camera_rotation_offset % self.num_envs
+                end_idx = min(start_idx + num_cameras, self.num_envs)
+                actual_count = end_idx - start_idx
+                
+                # 更新这一批 env 的缓存
+                self._depth_cache[start_idx:end_idx] = depth_flat[:actual_count]
+                
+                # 如果相机数量超过剩余 env 数量，wrap around
+                if actual_count < num_cameras:
+                    overflow = num_cameras - actual_count
+                    self._depth_cache[:overflow] = depth_flat[actual_count:]
+                    self._camera_rotation_offset = overflow
+                else:
+                    self._camera_rotation_offset = end_idx
+                
+                if self._camera_step_counter == 0:  # 只在刷新时打印
+                    print(f"[Camera] Rotated: updated envs [{start_idx}:{end_idx}], next offset={self._camera_rotation_offset}")
+            else:
+                # 相机数量足够，直接全部更新
+                self._depth_cache[:] = depth_flat[:self.num_envs]
+            
+            return self._depth_cache
+        else:
+            # No rotation needed, cache for all envs
+            self._latest_depth = depth
+            self._latest_depth_flat = depth_flat
+            self._camera_warned_depth = False
+            return depth_flat
     
     def compute_observations(self):
         """ Computes observations
         """
-        self.obs_buf = torch.cat((  self.base_ang_vel  * self.obs_scales.ang_vel, # 3dim
-                                    self.projected_gravity, # 3dim
-                                    self.commands[:, :3] * self.commands_scale, # 3dim
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos, # 12dim
-                                    self.dof_vel * self.obs_scales.dof_vel, # 12dim
-                                    self.actions # 12dim
-                                    ),dim=-1)
-        
-        # add perceptive inputs if not blind
+        proprio_terms = (
+            self.base_ang_vel * self.obs_scales.ang_vel,
+            self.projected_gravity,
+            self.commands[:, :3] * self.commands_scale,
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+            self.dof_vel * self.obs_scales.dof_vel,
+            self.actions,
+        )
+        proprio_obs = torch.cat(proprio_terms, dim=-1)
+
         if self.cfg.terrain.measure_heights:
-            heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements
-            self.obs_buf = torch.cat((self.obs_buf, heights), dim=-1)
-        # add noise if needed
+            heights = (
+                torch.clip(
+                    self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
+                    -1,
+                    1.0,
+                )
+                * self.obs_scales.height_measurements
+            )
+            proprio_obs = torch.cat((proprio_obs, heights), dim=-1)
+
+        if self._vision_obs_enabled:
+            if proprio_obs.shape[1] != self._proprio_obs_dim:
+                raise RuntimeError(
+                    f"Proprioceptive observation dimension mismatch: got {proprio_obs.shape[1]}, "
+                    f"expected {self._proprio_obs_dim}. Update cfg.env.proprio_obs_dim accordingly."
+                )
+            self.obs_buf[:, :self._proprio_obs_dim] = proprio_obs
+            depth_flat = self._fetch_depth_observation()
+            self.obs_buf[:, self._proprio_obs_dim:] = depth_flat
+        else:
+            self.obs_buf[:, :proprio_obs.shape[1]] = proprio_obs
+            if proprio_obs.shape[1] < self.obs_buf.shape[1]:
+                self.obs_buf[:, proprio_obs.shape[1]:] = 0.0
+
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
 
@@ -396,16 +630,13 @@ class SiriusJoyFlat(BaseTask):
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
 
-        # 2) 原来的 heading/yaw 命令逻辑
+        # 2) 计算当前机体朝向（yaw）用于航向控制
+        heading = None
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.base_quat, self.forward_vec)
             heading = torch.atan2(forward[:, 1], forward[:, 0])
-            self.commands[:, 2] = torch.clip(
-                0.5 * wrap_to_pi(self.commands[:, 3] - heading),
-                -1., 1.
-            )
 
-        # 3) 新增：让线速度命令 = “沿桥方向前进 + 根据桥面中线偏差纠偏”
+        # 3) 让线速度命令 = “沿桥方向前进 + 根据桥面中线偏差纠偏”
         # ---------------------------------------------------
         # 桥面中线：假设与 env_origins 在 y 轴对齐
         base_pos_world = self.root_states[:, :3]      # [num_envs, 3]
@@ -413,9 +644,7 @@ class SiriusJoyFlat(BaseTask):
         d_lat = base_pos_world[:, 1] - centerline_y   # 横向偏移，>0 说明在“上方”
 
         # 可调参数：纠偏增益（建议先从 0.5 或 1.0 开始）
-        # 如果你愿意，也可以放到 cfg 里：
-        # k_lat = self.cfg.commands.lateral_correction_gain
-        k_lat = 1.0
+        k_lat = float(getattr(self.cfg.commands, 'lateral_correction_gain', 1.0))
 
         # 世界系下的“前进 + 纠偏” 2D 方向：x 始终为 1，y 与偏移成反比
         # v_world_xy ∝ [1, -k * d_lat]
@@ -447,6 +676,19 @@ class SiriusJoyFlat(BaseTask):
         # 可选：只对“本来就要动”的命令做方向修正
         moving_mask = (speed > 1e-3).squeeze(1)                        # [num_envs]
         self.commands[moving_mask, :2] = speed[moving_mask] * dir_base_xy_unit[moving_mask, :]
+
+        # 3.1) 根据目标方向设定 heading（带轻量噪声实现小量域随机化）
+        desired_heading = torch.atan2(dir_world_xy_unit[:, 1], dir_world_xy_unit[:, 0])
+        noise_std = float(getattr(self.cfg.commands, 'heading_noise_std', 0.0))
+        if noise_std > 0.0:
+            desired_heading = wrap_to_pi(desired_heading + noise_std * torch.randn_like(desired_heading))
+        self.commands[:, 3] = wrap_to_pi(desired_heading)
+
+        if self.cfg.commands.heading_command:
+            heading_error = wrap_to_pi(self.commands[:, 3] - heading)
+            self.commands[:, 2] = torch.clip(0.5 * heading_error, -1., 1.)
+        else:
+            self.commands[:, 2] = 0.
 
         # 4) 保持原本地形高度测量与 push_robots 的逻辑
         if self.cfg.terrain.measure_heights:
@@ -540,7 +782,7 @@ class SiriusJoyFlat(BaseTask):
 
         # 在出发区中心半径 0.25 m 的圆内随机一个 xy 偏移
         # 使用极坐标采样：r = R * sqrt(u), theta = 2πu，保证在圆面上均匀
-        R = 0.2
+        R = 0.1
         r = R * torch.sqrt(torch.rand(len(env_ids), 1, device=self.device))
         theta = 2.0 * np.pi * torch.rand(len(env_ids), 1, device=self.device)
         offset_xy = torch.cat([r * torch.cos(theta), r * torch.sin(theta)], dim=1)
@@ -549,7 +791,7 @@ class SiriusJoyFlat(BaseTask):
         # ------------------- base velocities -------------------
         # [7:10]: lin vel, [10:13]: ang vel
         self.root_states[env_ids, 7:13] = torch_rand_float(
-            -0.5, 0.5, (len(env_ids), 6), device=self.device
+            -0.05, 0.05, (len(env_ids), 6), device=self.device
         )
 
         # ------------------- env -> actor indices -------------------
@@ -653,10 +895,105 @@ class SiriusJoyFlat(BaseTask):
         Args:
             env_ids (List[int]): ids of environments being reset
         """
-        # If the tracking reward is above 80% of the maximum, increase the range of commands
-        if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
-            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
-            self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+        # Robust curriculum gating using percentile + consecutive-success + debounce
+        if "tracking_lin_vel" not in self.episode_sums:
+            return
+        if not getattr(self, 'init_done', False):
+            return
+
+        # parameters (with safe defaults)
+        thresh = float(getattr(self.cfg.commands, 'curriculum_progress_threshold', 0.8))
+        inc = float(getattr(self.cfg.commands, 'curriculum_increment', 0.02))
+        alpha = float(getattr(self, 'curriculum_ema_alpha', 0.2))
+        consec_required = int(getattr(self.cfg.commands, 'curriculum_consecutive_successes', 5))
+        min_resets = int(getattr(self.cfg.commands, 'curriculum_min_resets_between_expansions', 20))
+        percentile = float(getattr(self.cfg.commands, 'curriculum_expand_percentile', 0.75))
+
+        # per-env average tracking (as numpy on CPU) normalized by seconds and reward scale
+        vals = self.episode_sums["tracking_lin_vel"].cpu().numpy() / self.max_episode_length_s
+        if "tracking_lin_vel" in self.reward_scales and self.reward_scales["tracking_lin_vel"] != 0:
+            vals = vals / float(self.reward_scales["tracking_lin_vel"])
+
+        # percentile over all envs (robust to outliers)
+        try:
+            pval = float(np.percentile(vals, float(percentile) * 100.0))
+        except Exception:
+            pval = float(np.mean(vals))
+
+        # update EMA (use mean as EMA input)
+        try:
+            mean_val = float(np.mean(vals))
+        except Exception:
+            mean_val = float(vals[0]) if len(vals) > 0 else 0.0
+
+        if not hasattr(self, 'command_tracking_ema'):
+            self.command_tracking_ema = mean_val
+        else:
+            self.command_tracking_ema = (1.0 - alpha) * float(self.command_tracking_ema) + alpha * mean_val
+
+        # store diagnostics for logging
+        self.last_avg_tracking = float(mean_val)
+        self.last_percentile = float(pval)
+
+        # initialize counters if missing
+        if not hasattr(self, 'curriculum_consec_ok_count'):
+            self.curriculum_consec_ok_count = 0
+        if not hasattr(self, 'resets_since_last_expansion'):
+            self.resets_since_last_expansion = 0
+        if not hasattr(self, 'curriculum_debug_counter'):
+            self.curriculum_debug_counter = 0
+
+        # count this reset call
+        self.resets_since_last_expansion += 1
+        self.curriculum_debug_counter += 1
+
+        # check percentile gate
+        single_ok = pval >= thresh
+        prev_consec = self.curriculum_consec_ok_count
+        if single_ok:
+            self.curriculum_consec_ok_count += 1
+        else:
+            self.curriculum_consec_ok_count = 0
+
+        # 调试信息已禁用（用户请求）
+        # 如需重新启用，取消注释下面的代码
+        # should_print_debug = (
+        #     self.curriculum_consec_ok_count != prev_consec or
+        #     self.curriculum_debug_counter % 50 == 0 or
+        #     self.curriculum_consec_ok_count >= max(1, consec_required - 2)
+        # )
+        # if should_print_debug:
+        #     try:
+        #         print(f"[CurriculumDebug] pval={pval:.3f} mean={mean_val:.3f} ema={self.command_tracking_ema:.3f} consec={self.curriculum_consec_ok_count}/{consec_required} resets={self.resets_since_last_expansion}/{min_resets}")
+        #     except Exception:
+        #         pass
+
+        # final gate: require consecutive successes and a minimum wait since last expansion
+        if (self.curriculum_consec_ok_count >= consec_required and self.resets_since_last_expansion >= min_resets):
+            # symmetric expansion for lin_vel_x and lin_vel_y
+            old_max_x = self.command_ranges["lin_vel_x"][1]
+            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - inc, -self.cfg.commands.max_curriculum, 0.)
+            self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + inc, 0., self.cfg.commands.max_curriculum)
+            self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - inc, -self.cfg.commands.max_curriculum, 0.)
+            self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + inc, 0., self.cfg.commands.max_curriculum)
+            ang_inc = inc * 1.0
+            self.command_ranges["ang_vel_yaw"][0] = np.clip(self.command_ranges["ang_vel_yaw"][0] - ang_inc, -self.cfg.commands.max_curriculum, 0.)
+            self.command_ranges["ang_vel_yaw"][1] = np.clip(self.command_ranges["ang_vel_yaw"][1] + ang_inc, 0., self.cfg.commands.max_curriculum)
+            # informational log so it's visible in training output
+            try:
+                print(f"\n{'='*60}")
+                print(f"[Curriculum] ✓ EXPANDED COMMAND RANGE")
+                print(f"  pval={pval:.3f} (thresh={thresh:.3f}), ema={self.command_tracking_ema:.3f}")
+                print(f"  lin_vel_x: {old_max_x:.3f} → {self.command_ranges['lin_vel_x'][1]:.3f} m/s")
+                print(f"  lin_vel_y: [{self.command_ranges['lin_vel_y'][0]:.3f}, {self.command_ranges['lin_vel_y'][1]:.3f}] m/s")
+                print(f"  ang_vel_yaw: [{self.command_ranges['ang_vel_yaw'][0]:.3f}, {self.command_ranges['ang_vel_yaw'][1]:.3f}] rad/s")
+                print(f"{'='*60}\n")
+            except Exception:
+                pass
+            # reset counters to avoid immediate repeated expansions
+            self.curriculum_consec_ok_count = 0
+            self.resets_since_last_expansion = 0
+            self.curriculum_debug_counter = 0  # reset debug counter after expansion
 
     # ---------- camera helpers ----------
     def _quat_from_euler(self, roll: float, pitch: float, yaw: float) -> gymapi.Quat:
@@ -751,74 +1088,102 @@ class SiriusJoyFlat(BaseTask):
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
 
-        # If camera tensors are enabled and available, try to use them first.
-        # This avoids extra GPU->CPU synchronization in many Isaac Gym builds.
+        import torch as _torch
         import numpy as _np
-        import time as _time
-        arr_raw = None
-        debug_timing = bool(getattr(self.cfg.camera, 'debug_timing', False))
-        try:
-            if getattr(self.camera_props, 'enable_tensors', False):
-                # try to access camera tensor buffers exposed by gym
-                # The exact API varies across Isaac Gym versions; attempt a safe access pattern.
-                # We look for a camera tensor per env and wrap it to numpy if possible.
-                imgs = []
-                t_start = _time.time()
-                for i in range(self.num_envs):
-                    try:
-                        # gym.get_camera_image may trigger sync; prefer gym.get_camera_image_tensor if present
-                        if hasattr(self.gym, 'get_camera_image_tensor'):
-                            t = self.gym.get_camera_image_tensor(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-                            # If tensor returned as cuda/torch tensor, convert to numpy safely
-                            if hasattr(t, 'cpu'):
-                                depth = t.cpu().numpy()
-                            else:
-                                depth = np.array(t, dtype='float32')
-                        else:
-                            # fallback to existing get_camera_image (may sync)
-                            depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-                        imgs.append(depth.astype('float32'))
-                    except Exception:
-                        imgs = []
-                        break
-                if len(imgs) == self.num_envs:
-                    arr_raw = _np.stack(imgs, axis=0)
-                    if debug_timing:
-                        t_end = _time.time()
-                        print(f"[CameraTiming] tensor_path_total={t_end - t_start:.6f}s")
-        except Exception:
-            arr_raw = None
-
-        # If tensor path unavailable or failed, fall back to rendering path
-        if arr_raw is None:
-            # ensure graphics are stepped so camera images are updated
-            t_start = _time.time()
+        
+        device = self.device if hasattr(self, 'device') else 'cpu'
+        max_depth = float(getattr(self.cfg.camera, 'max_depth', 10.0))
+        
+        # Try GPU-native tensor path first (fastest, no CPU sync)
+        if getattr(self.camera_props, 'enable_tensors', False) and hasattr(self.gym, 'get_camera_image_tensor'):
             try:
+                # Step graphics once for all cameras
                 self.gym.step_graphics(self.sim)
                 self.gym.render_all_camera_sensors(self.sim)
-            except Exception:
-                pass
-            imgs = []
-            for i in range(self.num_envs):
-                depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-                imgs.append(depth.astype('float32'))
-            arr_raw = _np.stack(imgs, axis=0)
-            if debug_timing:
-                t_end = _time.time()
-                print(f"[CameraTiming] render_path_total={t_end - t_start:.6f}s")
+                
+                # Collect tensors (hopefully on GPU)
+                depth_tensors = []
+                for i in range(self.num_envs):
+                    if self.camera_handles[i] < 0:
+                        # Placeholder for failed camera creation
+                        depth_tensors.append(_torch.full((self.cfg.camera.height, self.cfg.camera.width), max_depth, device=device))
+                        continue
+                    t = self.gym.get_camera_image_tensor(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                    
+                    # Convert to torch if not already
+                    if not isinstance(t, _torch.Tensor):
+                        t = _torch.from_numpy(np.array(t, dtype='float32'))
+                    
+                    # Move to GPU if needed
+                    if t.device != _torch.device(device):
+                        t = t.to(device)
+                    
+                    depth_tensors.append(t)
+                
+                # Stack on GPU
+                depth_stack = _torch.stack(depth_tensors, dim=0)  # (N, H, W)
+                
+                # Process on GPU (no CPU sync needed!)
+                # Handle NDC depth conversion if needed
+                if depth_stack.max() <= 1.01 and depth_stack.min() >= -0.01:
+                    near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
+                    far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
+                    ndc = depth_stack * 2.0 - 1.0
+                    denom = (far + near - ndc * (far - near))
+                    # Avoid division by zero
+                    denom = _torch.where(_torch.abs(denom) < 1e-6, _torch.ones_like(denom) * 1e-6, denom)
+                    z = (2.0 * near * far) / denom
+                    depth_linear = _torch.abs(z)
+                else:
+                    depth_linear = _torch.abs(depth_stack)
+                
+                # Clamp invalid values on GPU
+                depth_linear = _torch.where(_torch.isfinite(depth_linear), depth_linear, _torch.full_like(depth_linear, max_depth))
+                depth_linear = _torch.clamp(depth_linear, 0.0, max_depth)
+                
+                if as_torch:
+                    if return_mask:
+                        mask = _torch.isfinite(depth_stack)
+                        return depth_linear, mask
+                    return depth_linear
+                else:
+                    arr = depth_linear.cpu().numpy()
+                    if return_mask:
+                        mask = _torch.isfinite(depth_stack).cpu().numpy()
+                        return arr, mask
+                    return arr
+                    
+            except Exception as e:
+                # Tensor path failed, fall back to CPU path
+                if not hasattr(self, '_warned_tensor_fallback'):
+                    print(f"[Camera] GPU tensor path failed ({e}), falling back to CPU path")
+                    self._warned_tensor_fallback = True
 
-        # prepare linearized depth and hit mask
+        # Fallback: CPU path (slower, requires GPU→CPU sync)
+        # ensure graphics are stepped so camera images are updated
+        try:
+            self.gym.step_graphics(self.sim)
+            self.gym.render_all_camera_sensors(self.sim)
+        except Exception:
+            pass
+        
+        imgs = []
+        for i in range(self.num_envs):
+            depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+            imgs.append(depth.astype('float32'))
+        arr_raw = _np.stack(imgs, axis=0)
+        
+        # Process on CPU
         arr_linear = arr_raw.copy().astype('float32')
         hit_mask = _np.isfinite(arr_raw)
-
+        
         try:
             arr_max = float(_np.nanmax(arr_raw))
             arr_min = float(_np.nanmin(arr_raw))
         except Exception:
             arr_max = 1.0
             arr_min = 0.0
-
-        max_depth = float(getattr(self.cfg.camera, 'max_depth', 10.0))
+        
         if arr_max <= 1.01 and arr_min >= -0.01:
             near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
             far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
@@ -830,47 +1195,20 @@ class SiriusJoyFlat(BaseTask):
         else:
             with _np.errstate(invalid='ignore'):
                 arr_linear = _np.abs(arr_raw)
-
+        
         arr_linear[~_np.isfinite(arr_linear)] = max_depth
         arr_linear = _np.clip(arr_linear, 0.0, max_depth)
-
-        # save debug artifacts if enabled in config
-        try:
-            if getattr(self.cfg.camera, 'debug_outputs', False):
-                import os as _os
-                out_dir = _os.path.join('/home', 'eziothean', 'Sirius_RL_Gym-master', 'legged_gym', 'legged_gym', 'scripts', 'camera_outputs')
-                _np.save(_os.path.join(out_dir, 'depth_raw_renderer_latest.npy'), arr_raw[0] if arr_raw.shape[0] == 1 else arr_raw)
-                _np.save(_os.path.join(out_dir, 'depth_linearized_latest.npy'), arr_linear[0] if arr_linear.shape[0] == 1 else arr_linear)
-                _np.save(_os.path.join(out_dir, 'depth_mask_latest.npy'), hit_mask[0] if hit_mask.shape[0] == 1 else hit_mask)
-        except Exception:
-            pass
-
-        arr = arr_linear
-
+        
         if as_torch:
-            import torch as _torch
-            t = _torch.from_numpy(arr)
-            try:
-                t = t.to(_torch.get_default_dtype())
-            except Exception:
-                pass
-            try:
-                device = self.device if hasattr(self, 'device') else 'cpu'
-                t = t.to(device)
-            except Exception:
-                pass
+            t = _torch.from_numpy(arr_linear).to(_torch.get_default_dtype()).to(device)
             if return_mask:
-                m = _torch.from_numpy(hit_mask.astype('bool'))
-                try:
-                    m = m.to(device)
-                except Exception:
-                    pass
+                m = _torch.from_numpy(hit_mask.astype('bool')).to(device)
                 return t, m
             return t
         else:
             if return_mask:
-                return arr, hit_mask
-            return arr
+                return arr_linear, hit_mask
+            return arr_linear
 
     def get_camera_rgb_images(self, as_torch: bool = False, to_bgr: bool = True):
         """Render and return stacked RGB images from all env cameras.
@@ -1143,6 +1481,11 @@ class SiriusJoyFlat(BaseTask):
         # reward episode sums
         self.episode_sums = {name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
                              for name in self.reward_scales.keys()}
+        # --- curriculum EMA state (sliding average of tracking performance) ---
+        # scalar EMA used to decide when to expand command ranges
+        self.command_tracking_ema = 0.0
+        # smoothing factor (alpha) for EMA; smaller = slower response
+        self.curriculum_ema_alpha = float(getattr(self.cfg.commands, 'curriculum_ema_alpha', 0.2))
 
     def _create_ground_plane(self):
         """ Adds a ground plane to the simulation, sets friction and restitution based on the cfg.

@@ -1,7 +1,7 @@
 # sirius_two_span_bridge.py
 
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfgPPO
-from legged_gym.envs.sirius_diff_vis.sirius_flat_config import SiriusFlatCfg
+from legged_gym.envs.sirius_diff_vis.sirius_flat_config import SiriusFlatCfg, SiriusFlatCfgPPO
 from legged_gym.envs.sirius_diff_vis.sirius_joystick import SiriusJoyFlat
 
 
@@ -22,11 +22,17 @@ class SiriusTwoSpanBridgeCfg(SiriusFlatCfg):
     """
 
     class env(SiriusFlatCfg.env):
-        # 这里先沿用 flat 的 45 维观测（基础观测），后面如果加 height map 再改
-        num_observations = 45
         episode_length_s = 30.0
 
         num_envs = 1
+
+    class commands(SiriusFlatCfg.commands):
+        # 开启 heading 模式，让航向速度用目标 heading - 当前 heading 计算
+        heading_command = True
+        # 保持 resampling 时间一致，并额外提供一个可调的噪声幅度用于轻量域随机化
+        resampling_time = SiriusFlatCfg.commands.resampling_time
+        lateral_correction_gain = 1.0
+        heading_noise_std = 0.05
 
     # 初始姿态/关节角沿用 SiriusFlatCfg.init_state
     # 如果你要改起始点（圆半径 0.25 m），可以在这里单独写一个 init_state 覆盖，
@@ -114,15 +120,14 @@ class SiriusTwoSpanBridgeCfg(SiriusFlatCfg):
         max_depth = 10.0
 
 
-class SiriusTwoSpanBridgeCfgPPO(LeggedRobotCfgPPO):
-    """PPO 配置，先给一个比较常规的结构，后面可以再细调。"""
+class SiriusTwoSpanBridgeCfgPPO(SiriusFlatCfgPPO):
+    """PPO 配置：沿用 flat 任务的网络尺寸以便顺利从 Stage A checkpoint 恢复。"""
 
-    class policy(LeggedRobotCfgPPO.policy):
-        actor_hidden_dims = [256, 128, 64]
-        critic_hidden_dims = [256, 128, 64]
-        activation = "elu"
+    class policy(SiriusFlatCfgPPO.policy):
+        # 继承 flat 任务的网络结构，确保 staged 训练时模型尺寸一致
+        pass
 
-    class runner(LeggedRobotCfgPPO.runner):
+    class runner(SiriusFlatCfgPPO.runner):
         experiment_name = "sirius_two_span_bridge"
         max_iterations = 1200
 

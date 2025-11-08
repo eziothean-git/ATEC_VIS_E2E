@@ -175,8 +175,10 @@ class LeggedRobot(BaseTask):
         # update curriculum
         if self.cfg.terrain.curriculum:
             self._update_terrain_curriculum(env_ids)
-        # avoid updating command curriculum at each step since the maximum command is common to all envs
-        if self.cfg.commands.curriculum and (self.common_step_counter % self.max_episode_length==0):
+        # update command curriculum whenever some envs are reset so EMA/avg_tracking
+        # are refreshed frequently (EMA smooths rapid changes). This ensures the
+        # shared command ranges can expand as soon as performance improves.
+        if self.cfg.commands.curriculum:
             self.update_command_curriculum(env_ids)
         
         # reset robot states
@@ -201,6 +203,17 @@ class LeggedRobot(BaseTask):
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
         if self.cfg.commands.curriculum:
             self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+            # expose last avg tracking and EMA (if available) to extras for easier logging
+            if hasattr(self, 'last_avg_tracking'):
+                try:
+                    self.extras["episode"]["avg_tracking"] = float(self.last_avg_tracking)
+                except Exception:
+                    self.extras["episode"]["avg_tracking"] = 0.0
+            if hasattr(self, 'command_tracking_ema'):
+                try:
+                    self.extras["episode"]["command_tracking_ema"] = float(self.command_tracking_ema)
+                except Exception:
+                    self.extras["episode"]["command_tracking_ema"] = 0.0
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -437,7 +450,9 @@ class LeggedRobot(BaseTask):
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
         # base velocities
-        self.root_states[env_ids, 7:13] = torch_rand_float(-0.5, 0.5, (len(env_ids), 6), device=self.device) # [7:10]: lin vel, [10:13]: ang vel
+        # Use a small initial velocity range to make it easier for the agent to learn standing.
+        init_vel = getattr(self.cfg.commands, 'init_root_vel_range', 0.05)
+        self.root_states[env_ids, 7:13] = torch_rand_float(-init_vel, init_vel, (len(env_ids), 6), device=self.device) # [7:10]: lin vel, [10:13]: ang vel
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
                                                      gymtorch.unwrap_tensor(self.root_states),
@@ -478,10 +493,49 @@ class LeggedRobot(BaseTask):
         Args:
             env_ids (List[int]): ids of environments being reset
         """
-        # If the tracking reward is above 80% of the maximum, increase the range of commands
-        if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
-            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
-            self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+        # Increase the command ranges gradually when tracking reward is high enough.
+        # Uses parameters from cfg.commands: curriculum_increment and curriculum_progress_threshold.
+        try:
+            progress_thresh = float(self.cfg.commands.curriculum_progress_threshold)
+            inc = float(self.cfg.commands.curriculum_increment)
+        except Exception:
+            progress_thresh = 0.8
+            inc = 0.05
+
+        # compute averaged normalized tracking reward for linear velocity
+        # normalize by episode length in seconds to be consistent with episode logs
+        avg_tracking = torch.mean(self.episode_sums.get("tracking_lin_vel", torch.zeros_like(self.episode_sums[next(iter(self.episode_sums))]))[env_ids]) / self.max_episode_length_s
+        # Use reward scale normalization if available
+        if "tracking_lin_vel" in self.reward_scales and self.reward_scales["tracking_lin_vel"] != 0:
+            avg_tracking = avg_tracking / (self.reward_scales["tracking_lin_vel"]) 
+
+        # store last computed avg for logging / extras
+        try:
+            self.last_avg_tracking = float(avg_tracking.cpu().item())
+        except Exception:
+            self.last_avg_tracking = float(avg_tracking.item())
+
+        # debug print to help diagnose why curriculum isn't progressing
+        try:
+            print(f"[CurriculumDebug] avg_tracking={self.last_avg_tracking:.6f} thresh={progress_thresh} inc={inc} current_max_x={self.command_ranges['lin_vel_x'][1]:.3f}")
+        except Exception:
+            pass
+
+        if avg_tracking > progress_thresh:
+            # expand linear velocity x range symmetrically
+            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - inc, -self.cfg.commands.max_curriculum, 0.)
+            self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + inc, 0., self.cfg.commands.max_curriculum)
+            # expand linear velocity y range similarly
+            self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - inc, -self.cfg.commands.max_curriculum, 0.)
+            self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + inc, 0., self.cfg.commands.max_curriculum)
+            # expand angular yaw a bit faster/smaller step
+            ang_inc = inc * 1.0
+            self.command_ranges["ang_vel_yaw"][0] = np.clip(self.command_ranges["ang_vel_yaw"][0] - ang_inc, -self.cfg.commands.max_curriculum, 0.)
+            self.command_ranges["ang_vel_yaw"][1] = np.clip(self.command_ranges["ang_vel_yaw"][1] + ang_inc, 0., self.cfg.commands.max_curriculum)
+            try:
+                print(f"[Curriculum] Expanded commands: avg_tracking={float(avg_tracking):.3f} thresh={progress_thresh} new_max_x={self.command_ranges['lin_vel_x'][1]:.3f}")
+            except Exception:
+                pass
 
 
     def _get_noise_scale_vec(self, cfg):
@@ -897,12 +951,44 @@ class LeggedRobot(BaseTask):
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
 
-        # ensure graphics are stepped and sensors rendered
-        self.gym.step_graphics(self.sim)
-        self.gym.render_all_camera_sensors(self.sim)
-
+        # Try tensor (zero-copy) path first to avoid GPU->CPU syncs when available.
         import numpy as _np
+        import time as _time
         imgs = []
+        arr_raw = None
+        debug_timing = bool(getattr(self.cfg.camera, 'debug_timing', False))
+        try:
+            if getattr(self.camera_props, 'enable_tensors', False) and hasattr(self.gym, 'get_camera_image_tensor'):
+                t_start = _time.time()
+                for i in range(self.num_envs):
+                    try:
+                        t = self.gym.get_camera_image_tensor(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                        if hasattr(t, 'cpu'):
+                            depth = t.cpu().numpy()
+                        else:
+                            depth = _np.array(t, dtype='float32')
+                        imgs.append(depth.astype('float32'))
+                    except Exception:
+                        imgs = []
+                        break
+                if len(imgs) == self.num_envs:
+                    arr_raw = _np.stack(imgs, axis=0)
+                    if debug_timing:
+                        t_end = _time.time()
+                        print(f"[CameraTiming] base_tensor_path_total={t_end - t_start:.6f}s")
+        except Exception:
+            arr_raw = None
+
+        # If tensor path unavailable or failed, fall back to stepping graphics and rendering
+        if arr_raw is None:
+            t_start = _time.time()
+            # ensure graphics are stepped and sensors rendered
+            try:
+                self.gym.step_graphics(self.sim)
+                self.gym.render_all_camera_sensors(self.sim)
+            except Exception:
+                pass
+            imgs = []
 
         # depth shape expected (H, W)
         H = int(self.camera_props.height)

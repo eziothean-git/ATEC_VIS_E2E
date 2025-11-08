@@ -33,6 +33,7 @@ import os
 from datetime import datetime
 import threading
 import time
+import collections
 
 import isaacgym
 from legged_gym.envs import *
@@ -94,11 +95,31 @@ def train(args):
             if getattr(env_cfg.camera, 'camera_test_mode', False):
                 env_cfg.camera.max_depth = 4.0
                 env_cfg.camera.camera_test_frames = int(getattr(env_cfg.camera, 'camera_test_frames', 5))
+            # prefer capture-on-demand to avoid rendering every simulation step
+            env_cfg.camera.capture_on_demand = True
         except Exception:
             pass
 
     env, env_cfg = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    # Print camera / gym capabilities to help diagnose whether tensor (zero-copy) path is available
+    try:
+        has_tensor_api = hasattr(env.gym, 'get_camera_image_tensor')
+        cam_tensors_enabled = bool(getattr(env_cfg, 'camera', None) and getattr(env_cfg.camera, 'enable_tensors', False))
+        sim_params = getattr(env, 'sim_params', None)
+        use_gpu_pipeline = getattr(sim_params, 'use_gpu_pipeline', None) if sim_params is not None else None
+        print(f"[Startup] camera_tensors_enabled={cam_tensors_enabled} gym_has_get_camera_image_tensor={has_tensor_api} sim_use_gpu_pipeline={use_gpu_pipeline} num_envs={getattr(env, 'num_envs', 'N/A')}")
+    except Exception:
+        pass
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
+    # prepare an in-memory camera buffer if camera is enabled
+    try:
+        if getattr(env_cfg, 'camera', None) is not None and getattr(env_cfg.camera, 'enable', False):
+            max_mem = int(getattr(env_cfg.camera, 'max_mem_frames', 128))
+            # thread-safe deque for storing recent depth frames in memory (no disk I/O)
+            env._camera_frames = collections.deque(maxlen=max_mem)
+            env._camera_frames_lock = threading.Lock()
+    except Exception:
+        pass
     # If camera is enabled via CLI or config, spawn a background monitor thread
     # that periodically fetches camera depth images and writes them to disk.
     stop_event = threading.Event()
@@ -128,6 +149,10 @@ def train(args):
         except Exception:
             pass
 
+        # If running headless (no display) we use an in-memory buffer to store
+        # recent depth frames instead of writing PNG/CSV/NPY to disk which is slow.
+        mem_only = bool(getattr(args, 'headless', False) or getattr(env, 'headless', False))
+
         while not stop_event.is_set():
             try:
                 # Clear previous debug lines so they are not captured in the next camera render
@@ -137,6 +162,15 @@ def train(args):
                 except Exception:
                     pass
 
+                # If in mem_only (headless) mode, skip triggering rendering/readback
+                # because calls like get_camera_depth_images() and render_all_camera_sensors
+                # can force GPU->CPU synchronization and throttle the training loop.
+                if mem_only:
+                    # skip capture and visualization to avoid costly GPU syncs
+                    frame_idx += 1
+                    stop_event.wait(sleep_interval)
+                    continue
+
                 # Safely attempt to get depth images; may raise if camera not initialized
                 depth = env.get_camera_depth_images(as_torch=False)
                 # Attempt to fetch the raw renderer depth buffer directly from gym for
@@ -144,193 +178,56 @@ def train(args):
                 # post-wrapper values to determine whether clipping/translation is the cause
                 # of the binary output.
                 raw_depth = None
-                try:
-                    from isaacgym import gymapi
-                    raw = env.gym.get_camera_image(env.sim, env.envs[0], env.camera_handles[0], gymapi.IMAGE_DEPTH)
-                    raw = np.array(raw, dtype='float32')
-                    raw_depth = raw
-                    # save raw renderer depth for later inspection (overwrite latest)
+                # Only attempt a direct renderer read when not in mem_only mode (it forces an extra GPU->CPU read)
+                if not mem_only:
                     try:
-                        np.save(os.path.join(out_dir, 'depth_raw_renderer_latest.npy'), raw_depth)
-                    except Exception:
-                        pass
-                except Exception:
-                    raw_depth = None
-                # Save only the latest depth (overwrite previous files to avoid clutter)
-                if depth is not None:
-                    # overwrite wrapper-normalized depth (what get_camera_depth_images returns)
-                    try:
-                        np.save(os.path.join(out_dir, 'depth_raw_latest.npy'), depth)
-                    except Exception:
-                        pass
-                    # save a visualization for the first env only and a CSV of actual depths
-                    if plt is not None:
+                        from isaacgym import gymapi
+                        raw = env.gym.get_camera_image(env.sim, env.envs[0], env.camera_handles[0], gymapi.IMAGE_DEPTH)
+                        raw = np.array(raw, dtype='float32')
+                        raw_depth = raw
+                        # save raw renderer depth for later inspection (overwrite latest)
                         try:
-                            import matplotlib.pyplot as _plt
-                            max_depth_cfg = float(getattr(env_cfg.camera, 'max_depth', getattr(env_cfg.camera, 'far_plane', 10.0)))
-                            d0 = np.abs(depth[0].astype('float32'))
-                            # mask invalids
-                            invalid_mask = np.isnan(d0) | np.isneginf(d0) | np.isposinf(d0)
-                            d0[invalid_mask] = np.nan
-
-                            # compute statistics on valid pixels
-                            valid = ~np.isnan(d0)
-                            num_valid = int(np.count_nonzero(valid))
-                            total = d0.size
-                            valid_frac = num_valid / total if total > 0 else 0.0
-                            if num_valid > 0:
-                                valid_vals = d0[valid]
-                                data_min = float(np.nanmin(valid_vals))
-                                data_max = float(np.nanmax(valid_vals))
-                                data_mean = float(np.nanmean(valid_vals))
-                            else:
-                                data_min = float('nan')
-                                data_max = float('nan')
-                                data_mean = float('nan')
-
-                            # choose display max: prefer actual data_max (no clipping to config) so
-                            # visualization uses the true dynamic range produced by the renderer.
-                            if num_valid > 0 and np.isfinite(data_max) and data_max > 0:
-                                display_max = data_max
-                            else:
-                                display_max = max_depth_cfg
-
-                            # prepare uint8 image: map 0..display_max -> 0..255
-                            img = d0.copy()
-                            img[np.isnan(img)] = display_max
-                            img = np.clip(img, 0.0, display_max)
-                            if display_max > 0:
-                                img_u8 = (img / display_max * 255.0).astype('uint8')
-                            else:
-                                img_u8 = np.zeros_like(img, dtype='uint8')
-
-                            # overwrite PNGs (latest only)
-                            png_path = os.path.join(out_dir, 'depth_frame_latest.png')
-                            _plt.imsave(png_path, img_u8, cmap='gray', vmin=0, vmax=255)
-                            try:
-                                inv = 255 - img_u8
-                                png_inv = os.path.join(out_dir, 'depth_frame_latest_inverted.png')
-                                _plt.imsave(png_inv, inv, cmap='gray', vmin=0, vmax=255)
-                            except Exception:
-                                pass
-                            try:
-                                if num_valid > 0:
-                                    # use percentile without clamping to config max_depth
-                                    vmax = float(np.percentile(valid_vals, 99))
-                                else:
-                                    vmax = display_max
-                                if vmax <= 0:
-                                    vmax = display_max
-                                img_pct = img.copy()
-                                img_pct = np.clip(img_pct, 0.0, vmax)
-                                img_pct_u8 = (img_pct / vmax * 255.0).astype('uint8')
-                                png_pct = os.path.join(out_dir, 'depth_frame_latest_pct99.png')
-                                _plt.imsave(png_pct, img_pct_u8, cmap='gray', vmin=0, vmax=255)
-                            except Exception:
-                                pass
-
-                            # overwrite CSV with full float depth matrix for env0
-                            csv_path = os.path.join(out_dir, 'depth_matrix_env0_latest.csv')
-                            try:
-                                # write as floats with header
-                                np.savetxt(csv_path, d0, delimiter=',', fmt='%.6f')
-                            except Exception:
-                                pass
-
-                            # compute additional diagnostics: dtype, unique values (small images only), percentiles, center samples
-                            try:
-                                dtype = str(d0.dtype)
-                                # unique values and counts (if not too many uniques)
-                                uniques, counts = np.unique(d0, return_counts=True)
-                                unique_info = list(zip(uniques.tolist(), counts.tolist())) if uniques.size <= 256 else [('too_many_uniques', uniques.size)]
-                            except Exception:
-                                dtype = 'unknown'
-                                unique_info = []
-
-                            # percentiles
-                            try:
-                                p10 = float(np.nanpercentile(d0, 10))
-                                p50 = float(np.nanpercentile(d0, 50))
-                                p90 = float(np.nanpercentile(d0, 90))
-                            except Exception:
-                                p10 = p50 = p90 = float('nan')
-
-                            # center 5x5 samples
-                            try:
-                                h, w = d0.shape
-                                ch, cw = h // 2, w // 2
-                                center_samples = d0[ch-2:ch+3, cw-2:cw+3].tolist()
-                            except Exception:
-                                center_samples = []
-
-                            # overwrite stats file
-                            stats_path = os.path.join(out_dir, 'depth_stats_latest.txt')
-                            with open(stats_path, 'w') as sf:
-                                sf.write(f"frame,latest\n")
-                                sf.write(f"dtype,{dtype}\n")
-                                sf.write(f"valid_pixels,{num_valid}\n")
-                                sf.write(f"total_pixels,{total}\n")
-                                sf.write(f"valid_fraction,{valid_frac:.6f}\n")
-                                sf.write(f"data_min,{data_min}\n")
-                                sf.write(f"data_max,{data_max}\n")
-                                sf.write(f"data_mean,{data_mean}\n")
-                                sf.write(f"p10,{p10}\n")
-                                sf.write(f"p50,{p50}\n")
-                                sf.write(f"p90,{p90}\n")
-                                sf.write(f"config_max_depth,{max_depth_cfg}\n")
-                                sf.write(f"display_max_used,{display_max}\n")
-                                sf.write("unique_values_and_counts,\n")
-                                for u in unique_info:
-                                    sf.write(f"{u[0]},{u[1]}\n")
-                                sf.write("center_5x5_samples,\n")
-                                for row in center_samples:
-                                    sf.write(','.join(str(x) for x in row) + "\n")
-                            # also write raw renderer depth diagnostics if we managed to fetch it
-                            try:
-                                if raw_depth is not None:
-                                    rd = raw_depth
-                                    rmin = float(np.nanmin(rd))
-                                    rmax = float(np.nanmax(rd))
-                                    # unique values (cap)
-                                    rur, ruc = np.unique(rd, return_counts=True)
-                                    sf.write("raw_min,%s\n" % rmin)
-                                    sf.write("raw_max,%s\n" % rmax)
-                                    sf.write("raw_unique_values_and_counts,\n")
-                                    if rur.size <= 512:
-                                        for a, b in zip(rur.tolist(), ruc.tolist()):
-                                            sf.write(f"{a},{b}\n")
-                                    else:
-                                        sf.write(f"too_many_raw_uniques,{rur.size}\n")
-                                else:
-                                    sf.write("raw_unique_values_and_counts,unavailable\n")
-                            except Exception:
-                                sf.write("raw_unique_values_and_counts,unavailable\n")
+                            np.save(os.path.join(out_dir, 'depth_raw_renderer_latest.npy'), raw_depth)
                         except Exception:
                             pass
-                    frame_idx += 1
-                    # If running in short camera test mode, stop after requested frames
-                    try:
-                        if getattr(env_cfg.camera, 'camera_test_mode', False):
-                            max_frames = int(getattr(env_cfg.camera, 'camera_test_frames', 5))
-                            if frame_idx >= max_frames:
-                                # create a done marker and stop the monitor
-                                done_path = os.path.join(out_dir, 'camera_test_done.txt')
-                                with open(done_path, 'w') as df:
-                                    df.write(f"captured_frames,{frame_idx}\n")
-                                stop_event.set()
-                                return
                     except Exception:
-                        pass
+                        raw_depth = None
+                # Save only the latest depth (overwrite previous files to avoid clutter)
+                if depth is not None:
+                    # If running in-memory-only mode (no display), push depths to env buffer
+                    if mem_only and hasattr(env, '_camera_frames'):
+                        try:
+                            with env._camera_frames_lock:
+                                env._camera_frames.append(depth.copy())
+                        except Exception:
+                            pass
+                    else:
+                        # non-mem mode: minimal save to disk to preserve previous behavior
+                        try:
+                            np.save(os.path.join(out_dir, 'depth_raw_latest.npy'), depth)
+                        except Exception:
+                            pass
+                frame_idx += 1
+                # If running in short camera test mode, stop after requested frames
+                try:
+                    if getattr(env_cfg.camera, 'camera_test_mode', False):
+                        max_frames = int(getattr(env_cfg.camera, 'camera_test_frames', 5))
+                        if frame_idx >= max_frames:
+                            # create a done marker and stop the monitor
+                            done_path = os.path.join(out_dir, 'camera_test_done.txt')
+                            with open(done_path, 'w') as df:
+                                df.write(f"captured_frames,{frame_idx}\n")
+                            stop_event.set()
+                            return
+                except Exception:
+                    pass
             except Exception:
                 # Camera may not be initialized or rendering not available; ignore and retry
                 pass
 
-            # After capturing depth (so debug markers aren't included), redraw camera position markers
-            try:
-                if hasattr(env, 'visualize_camera_position'):
-                    env.visualize_camera_position()
-            except Exception:
-                pass
+            # Note: camera position visualization has been made opt-in and is
+            # intentionally not called here to avoid extra viewer/device interactions
+            # that can cause errors when many envs are created (handles mismatches).
 
             stop_event.wait(sleep_interval)
 

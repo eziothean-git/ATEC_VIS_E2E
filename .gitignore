@@ -40,8 +40,19 @@ logs/
 *.log
 
 # Large data and resources
+# Large data and resources
+# Ignore resources and datasets in general (these are often large/generated),
+# but explicitly un-ignore a few project directories that must be tracked.
 */resources/
 */datasets/
+
+# Keep URDFs and other robot assets under version control
+!legged_gym/resources/
+!legged_gym/resources/**
+
+# Ensure the rsl_rl package is tracked (user reported it was ignored)
+!rsl_rl/
+!rsl_rl/**
 # These are some examples of commonly ignored file patterns.
 # You should customize this list as applicable to your project.
 # Learn more about .gitignore:
@@ -114,4 +125,5 @@ isaacgym
 
 *.swp
 
-!deploy/iceoryx/**legged_gym/legged_gym/scripts/camera_outputs/
+!legged_gym/legged_gym/scripts/camera_outputs/
+

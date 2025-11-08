@@ -157,6 +157,11 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
                 env_cfg.camera.max_envs = args.camera_max_envs
             except Exception:
                 pass
+        if hasattr(args, 'debug_viz') and args.debug_viz:
+            try:
+                env_cfg.env.debug_viz = True
+            except Exception:
+                pass
         if hasattr(args, 'camera_debug_outputs') and args.camera_debug_outputs:
             try:
                 env_cfg.camera.debug_outputs = True
@@ -206,6 +211,7 @@ def get_args():
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
         
         {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
+    {"name": "--debug_viz", "action": "store_true", "default": False, "help": "Enable viewer debug overlays (e.g. command heading arrows)."},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
         {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
         {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
