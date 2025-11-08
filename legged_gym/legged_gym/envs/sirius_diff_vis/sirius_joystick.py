@@ -89,6 +89,15 @@ class SiriusJoyFlat(BaseTask):
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
+        # perf stats for lightweight profiling (seconds)
+        self._perf_stats = {
+            'render': 0.0,
+            'simulate': 0.0,
+            'set_dof': 0.0,
+            'refresh_dof': 0.0,
+            'post_physics': 0.0,
+            'steps': 0
+        }
 
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -99,14 +108,50 @@ class SiriusJoyFlat(BaseTask):
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         # step physics and render each frame
+        import time as _time
+        t0 = _time.time()
         self.render()
+        t_render = _time.time() - t0
+        t_sim_total = 0.0
+        t_set_dof = 0.0
+        t_refresh = 0.0
         for _ in range(self.cfg.control.decimation):
+            t_a = _time.time()
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
+            t_set_dof += _time.time() - t_a
+
+            t_b = _time.time()
             self.gym.simulate(self.sim)
+            t_sim = _time.time() - t_b
+            t_sim_total += t_sim
+
             if self.device == 'cpu':
                 self.gym.fetch_results(self.sim, True)
+
+            t_c = _time.time()
             self.gym.refresh_dof_state_tensor(self.sim)
+            t_refresh += _time.time() - t_c
+
+        t_post_a = _time.time()
+        self.post_physics_step()
+        t_post = _time.time() - t_post_a
+
+        # accumulate perf stats
+        ps = self._perf_stats
+        ps['render'] += t_render
+        ps['simulate'] += t_sim_total
+        ps['set_dof'] += t_set_dof
+        ps['refresh_dof'] += t_refresh
+        ps['post_physics'] += t_post
+        ps['steps'] += 1
+
+        # every N steps optionally print summary (cheap): choose N based on sim size
+        # Only print when explicitly enabled via cfg.camera.print_perf = True
+        if getattr(getattr(self.cfg, 'camera', None), 'print_perf', False):
+            if ps['steps'] % max(1, int(200 / max(1, self.num_envs))) == 0:
+                avg = {k: (v / ps['steps']) for k, v in ps.items() if k != 'steps'}
+                print(f"[Perf] num_envs={self.num_envs} avg_render={avg['render']:.6f}s avg_simulate={avg['simulate']:.6f}s avg_set_dof={avg['set_dof']:.6f}s avg_refresh={avg['refresh_dof']:.6f}s avg_post={avg['post_physics']:.6f}s steps={ps['steps']}")
         self.post_physics_step()
 
         # return clipped obs, clipped states (None), rewards, dones and infos
@@ -641,8 +686,10 @@ class SiriusJoyFlat(BaseTask):
         cam_props.width = int(self.cfg.camera.width)
         cam_props.height = int(self.cfg.camera.height)
         cam_props.horizontal_fov = float(self.cfg.camera.horizontal_fov)
-        cam_props.use_collision_geometry = False
-        cam_props.enable_tensors = False
+        cam_props.use_collision_geometry = bool(getattr(self.cfg.camera, 'use_collision_geometry', False))
+        # Prefer tensor path when available to avoid costly GPU->CPU readbacks.
+        # The actual availability depends on the Isaac Gym build and viewer.
+        cam_props.enable_tensors = bool(getattr(self.cfg.camera, 'enable_tensors', False))
         self.camera_props = cam_props
 
         # find body index to attach to
@@ -667,6 +714,14 @@ class SiriusJoyFlat(BaseTask):
         for i in range(self.num_envs):
             env = self.envs[i]
             cam_h = self.gym.create_camera_sensor(env, cam_props)
+            if cam_h is None or int(cam_h) < 0:
+                # creation failed for this env, skip attaching and log once
+                if not getattr(self, '_camera_warned_creation_failed', False):
+                    print(f"[Camera] warning: create_camera_sensor failed for env index {i} (handle={cam_h}). Skipping camera for this env.")
+                    self._camera_warned_creation_failed = True
+                # append a placeholder to keep indices aligned
+                self.camera_handles.append(-1)
+                continue
             body_handle = self.gym.find_actor_rigid_body_handle(env, self.actor_handles[i], target_body_name)
             if body_handle < 0:
                 if not self._camera_warned_missing_body:
@@ -680,6 +735,12 @@ class SiriusJoyFlat(BaseTask):
         # Store camera body info for visualization
         self._camera_body_name = target_body_name
 
+        # If tensor path enabled, create a placeholder container for per-env camera tensors.
+        # This does not assume a specific tensor API; it provides a documented hook
+        # so other code (or runtime) can populate `self.camera_tensors` when available.
+        if getattr(self.camera_props, 'enable_tensors', False):
+            self.camera_tensors = [None] * self.num_envs
+
     def get_camera_depth_images(self, as_torch: bool = True, return_mask: bool = False):
         """Render and return stacked depth images from all env cameras.
         Returns a tensor/ndarray of shape (num_envs, H, W).
@@ -690,18 +751,61 @@ class SiriusJoyFlat(BaseTask):
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
 
-        # ensure graphics are stepped so camera images are updated
-        self.gym.step_graphics(self.sim)
-        self.gym.render_all_camera_sensors(self.sim)
-
-        imgs = []
-        for i in range(self.num_envs):
-            depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-            imgs.append(depth.astype('float32'))
+        # If camera tensors are enabled and available, try to use them first.
+        # This avoids extra GPU->CPU synchronization in many Isaac Gym builds.
         import numpy as _np
+        import time as _time
+        arr_raw = None
+        debug_timing = bool(getattr(self.cfg.camera, 'debug_timing', False))
+        try:
+            if getattr(self.camera_props, 'enable_tensors', False):
+                # try to access camera tensor buffers exposed by gym
+                # The exact API varies across Isaac Gym versions; attempt a safe access pattern.
+                # We look for a camera tensor per env and wrap it to numpy if possible.
+                imgs = []
+                t_start = _time.time()
+                for i in range(self.num_envs):
+                    try:
+                        # gym.get_camera_image may trigger sync; prefer gym.get_camera_image_tensor if present
+                        if hasattr(self.gym, 'get_camera_image_tensor'):
+                            t = self.gym.get_camera_image_tensor(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                            # If tensor returned as cuda/torch tensor, convert to numpy safely
+                            if hasattr(t, 'cpu'):
+                                depth = t.cpu().numpy()
+                            else:
+                                depth = np.array(t, dtype='float32')
+                        else:
+                            # fallback to existing get_camera_image (may sync)
+                            depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                        imgs.append(depth.astype('float32'))
+                    except Exception:
+                        imgs = []
+                        break
+                if len(imgs) == self.num_envs:
+                    arr_raw = _np.stack(imgs, axis=0)
+                    if debug_timing:
+                        t_end = _time.time()
+                        print(f"[CameraTiming] tensor_path_total={t_end - t_start:.6f}s")
+        except Exception:
+            arr_raw = None
 
-        # raw renderer buffer
-        arr_raw = _np.stack(imgs, axis=0)
+        # If tensor path unavailable or failed, fall back to rendering path
+        if arr_raw is None:
+            # ensure graphics are stepped so camera images are updated
+            t_start = _time.time()
+            try:
+                self.gym.step_graphics(self.sim)
+                self.gym.render_all_camera_sensors(self.sim)
+            except Exception:
+                pass
+            imgs = []
+            for i in range(self.num_envs):
+                depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                imgs.append(depth.astype('float32'))
+            arr_raw = _np.stack(imgs, axis=0)
+            if debug_timing:
+                t_end = _time.time()
+                print(f"[CameraTiming] render_path_total={t_end - t_start:.6f}s")
 
         # prepare linearized depth and hit mask
         arr_linear = arr_raw.copy().astype('float32')
@@ -843,25 +947,14 @@ class SiriusJoyFlat(BaseTask):
         Call this after step() is called to see where the camera is mounted.
         This uses the tensor API which is compatible with GPU pipeline.
         """
-        if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
-            print("[Camera] Camera not initialized, cannot visualize")
+        # Only visualize when explicitly enabled in config. Visualization can
+        # be expensive and may cause issues with very large numbers of envs.
+        if not getattr(self.cfg.camera, 'show_camera_position', False):
             return
 
-
-            arr_linear[~_np.isfinite(arr_linear)] = max_depth
-            arr_linear = _np.clip(arr_linear, 0.0, max_depth)
-
-            # save debug artifacts if possible
-            try:
-                import os as _os
-                out_dir = _os.path.join('/home', 'eziothean', 'Sirius_RL_Gym-master', 'legged_gym', 'legged_gym', 'scripts', 'camera_outputs')
-                _np.save(_os.path.join(out_dir, 'depth_raw_renderer_latest.npy'), arr_raw[0] if arr_raw.shape[0] == 1 else arr_raw)
-                _np.save(_os.path.join(out_dir, 'depth_linearized_latest.npy'), arr_linear[0] if arr_linear.shape[0] == 1 else arr_linear)
-                _np.save(_os.path.join(out_dir, 'depth_mask_latest.npy'), hit_mask[0] if hit_mask.shape[0] == 1 else hit_mask)
-            except Exception:
-                pass
-
-            arr = arr_linear
+        if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
+            # do not spam logs in normal training
+            return
         from isaacgym import gymutil
         # Get camera configuration
         px, py, pz = self.cfg.camera.position

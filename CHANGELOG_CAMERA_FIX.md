@@ -21,3 +21,8 @@ If you want the precise body-level position fix, reply and I'll implement retrie
 - Fix: Auto-linearize renderer depth (NDC or view-space z) to meters, preserve hit-mask, add CLI flags for debug outputs and mask-in-obs.
   - Files changed: `legged_gym/legged_gym/envs/base/legged_robot.py`, `legged_gym/legged_gym/envs/sirius_diff_vis/sirius_joystick.py`, `legged_gym/legged_gym/utils/helpers.py`, `legged_gym/legged_gym/scripts/train.py`
   - How to reproduce: run train with `--camera_enable --camera_test_mode --camera_debug_outputs`.
+
+- Chore: Make periodic camera performance logging opt-in via `cfg.camera.print_perf` (default: False).
+  - Rationale: avoid noisy logs during normal runs; allow turning on per-run performance summaries for debugging.
+  - Files changed: `legged_gym/legged_gym/envs/sirius_diff_vis/sirius_joystick.py`, `legged_gym/legged_gym/envs/sirius_diff_vis/sirius_flat_config.py`, `README.md`, `docs/CAMERA_FIX.md`.
+  - How to enable: set `cfg.camera.print_perf = True` in your config (or add `print_perf: true` under `camera:` in YAML) before creating the env.

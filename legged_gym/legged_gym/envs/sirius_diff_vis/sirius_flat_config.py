@@ -129,6 +129,9 @@ class SiriusFlatCfg( LeggedRobotCfg ):
         width = 160
         height = 120
         horizontal_fov = 90.0
+        # 控制是否打印周期性性能统计信息（例如 [Perf] 行）。默认关闭，
+        # 仅在你明确希望调试时把 cfg.camera.print_perf 设为 True。
+        print_perf = False
 
 class SiriusFlatCfgPPO( LeggedRobotCfgPPO ):
     class policy( LeggedRobotCfgPPO.policy ):

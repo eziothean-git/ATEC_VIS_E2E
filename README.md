@@ -281,3 +281,13 @@ This repository is built upon the support and contributions of the following ope
 - [iceoryx](https://github.com/eclipse-iceoryx/iceoryx/tree/main)
 
 See docs/CAMERA_FIX.md for details about the camera depth fixes and usage.
+
+Camera debug/perf printing
+-------------------------
+If you want periodic camera-related performance summaries (the lines prefixed with [Perf]) you can enable them at runtime via the configuration option `cfg.camera.print_perf = True`.
+
+How to enable:
+- In a cfg file or YAML under the `camera:` section add `print_perf: true`.
+- Or set it programmatically before creating the env: `cfg.camera.print_perf = True`.
+
+By default this is OFF to avoid noisy logs in normal runs. See `docs/CAMERA_FIX.md` for more camera-related debug options.

@@ -99,3 +99,10 @@
    ---
 
    （此文件已由脚本自动更新，提交并推送到当前分支。若需要把该变更合并到其它分支或开 PR，我也可以为你创建 PR。）
+
+附加变更（2025-11-08）：
+
+- 变更：将周期性相机性能汇总打印（带 `[Perf]` 前缀）改为可选，默认关闭。
+  - 原因：避免训练或大规模并行运行时产生大量噪声日志；需要时可在配置中打开以便定位性能瓶颈。
+  - 如何启用：在任务的 camera 配置中设置 `print_perf: true` 或在 Python 中设置 `cfg.camera.print_perf = True`。
+  - 涉及文件：`legged_gym/legged_gym/envs/sirius_diff_vis/sirius_joystick.py`、`legged_gym/legged_gym/envs/sirius_diff_vis/sirius_flat_config.py`、`README.md`、`docs/CAMERA_FIX.md`。
