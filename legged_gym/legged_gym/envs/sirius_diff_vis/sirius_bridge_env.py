@@ -27,7 +27,7 @@ class SiriusTwoSpanBridgeCfg(SiriusFlatCfg):
         num_observations = 45  # 本体观测维度 (不包含视觉，视觉通过 depth_obs_buf 单独传递)
         episode_length_s = 30.0
 
-        num_envs = 1024  # 桥梁场景用较少env
+        num_envs = 512  # 桥梁场景：减少env数量以适应更复杂的场景
 
     # 初始姿态/关节角沿用 SiriusFlatCfg.init_state
     # 如果你要改起始点（圆半径 0.25 m），可以在这里单独写一个 init_state 覆盖，
@@ -125,6 +125,11 @@ class SiriusTwoSpanBridgeCfgPPO(LeggedRobotCfgPPO):
     只覆盖 runner 中的任务特定参数（实验名、迭代次数等）。
     """
     
+    # ⚠️ 必须继承 vision_encoder 配置！
+    class vision_encoder(SiriusSharedPPOCfg.vision_encoder):
+        # 使用共享配置的视觉编码器（与 sirius 平地任务完全相同）
+        pass
+    
     # 继承共享的 policy 配置（网络结构）- 必须与 sirius 任务完全相同！
     class policy(SiriusSharedPPOCfg.policy):
         # 使用共享配置的 [256, 128, 64]
@@ -133,12 +138,20 @@ class SiriusTwoSpanBridgeCfgPPO(LeggedRobotCfgPPO):
     
     # 继承共享的 algorithm 配置（PPO 超参数）
     class algorithm(SiriusSharedPPOCfg.algorithm):
+        # 阶段2：512 envs，学习率相应减半（相比阶段1的1024 envs）
+        # 线性缩放：lr_stage2 = lr_stage1 * (num_envs_stage2 / num_envs_stage1)
+        # = 2.5e-4 * (512 / 1024) = 1.25e-4
         pass
 
     # 任务特定的 runner 配置
     class runner(SiriusSharedPPOCfg.runner):
         experiment_name = "sirius_bridge"  # 阶段2: 桥梁训练
         max_iterations = 1200
+        
+        # 学习率根据 num_envs 线性缩放
+        # 阶段1 (sirius): 1024 envs, lr=2.5e-4
+        # 阶段2 (sirius_diff_vis): 512 envs, lr=1.25e-4 (减半)
+        learning_rate = 1.25e-4
         
         # Resume 相关配置（从阶段1继续训练时使用）
         # 使用方法：python train.py --task=sirius_diff_vis --resume

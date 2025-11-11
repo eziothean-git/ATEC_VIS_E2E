@@ -62,6 +62,13 @@ from .sirius_diff_vis.sirius_bridge_env import (
     SiriusTwoSpanBridgeCfgPPO,
 )
 
+# 导入课程学习任务（多样化地形训练）
+from .sirius_diff_vis.sirius_curriculum_config import (
+    SiriusCurriculum,
+    SiriusCurriculumCfg,
+    SiriusCurriculumCfgPPO,
+)
+
 # 注册统一的 diff_vis 任务名，供 python train.py --task=sirius_diff_vis 使用
 # 这里直接使用两段桥环境
 task_registry.register(
@@ -69,5 +76,13 @@ task_registry.register(
     SiriusTwoSpanBridge,
     SiriusTwoSpanBridgeCfg(),
     SiriusTwoSpanBridgeCfgPPO(),
+)
+
+# 注册课程学习任务，用于训练泛化能力
+task_registry.register(
+    "sirius_curriculum",
+    SiriusCurriculum,
+    SiriusCurriculumCfg(),
+    SiriusCurriculumCfgPPO(),
 )
 

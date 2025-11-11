@@ -546,7 +546,7 @@ class SiriusJoyFlat(BaseTask):
 
         # 在出发区中心半径 0.25 m 的圆内随机一个 xy 偏移
         # 使用极坐标采样：r = R * sqrt(u), theta = 2πu，保证在圆面上均匀
-        R = 0.2
+        R = 0.05
         r = R * torch.sqrt(torch.rand(len(env_ids), 1, device=self.device))
         theta = 2.0 * np.pi * torch.rand(len(env_ids), 1, device=self.device)
         offset_xy = torch.cat([r * torch.cos(theta), r * torch.sin(theta)], dim=1)
