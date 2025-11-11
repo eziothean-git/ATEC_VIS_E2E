@@ -35,9 +35,9 @@ venv/
 .DS_Store
 Thumbs.db
 
-# logs
-logs/
-*.log
+# logs - COMMENTED OUT TO TRACK LOGS
+# logs/
+# *.log
 
 # Large data and resources
 */resources/
@@ -57,8 +57,8 @@ dist/
 # Compiled Python bytecode
 *.py[cod]
 
-# Log files
-*.log
+# Log files - COMMENTED OUT TO TRACK LOGS
+# *.log
 
 # Package files
 *.jar
@@ -94,19 +94,19 @@ Thumbs.db
 
 # VS Code
 .vscode
+# logs - COMMENTED OUT TO TRACK LOGS
 # logs
-logs
-runs
+# runs
 
 # other
 *.egg-info
 __pycache__
 
 
-# ROS2 build
-build
-install
-log
+# ROS2 build - COMMENTED OUT TO TRACK LOGS
+# build
+# install
+# log
 
 # isaac gym
 isaac-gym-preview*
@@ -127,7 +127,8 @@ legged_gym/legged_gym/resources/
 
 # 2) 手动下载的 rsl_rl env 源码（如果你最终使用 pip 安装的 rsl-rl 包，不需要提交本地补丁）。
 #    如果团队需要跟踪这些文件，请删掉下面两行；否则保持忽略防止意外提交。
-rsl_rl/rsl_rl/env/
+# COMMENTED OUT TO TRACK ALL RSL_RL FILES
+# rsl_rl/rsl_rl/env/
 
 # 3) 可选：通配忽略所有多级 resources 目录（若存在深层 assets）。
 **/resources/

@@ -1,12 +1,13 @@
+# COMMENTED OUT TO TRACK ALL FILES IN RSL_RL
 # IDEs
-.idea
+# .idea
 
 # builds
-*.egg-info
+# *.egg-info
 
 # cache
-__pycache__
-.pytest_cache
+# __pycache__
+# .pytest_cache
 
 # vs code
-.vscode
+# .vscode
