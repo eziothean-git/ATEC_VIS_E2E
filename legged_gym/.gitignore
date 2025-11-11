@@ -51,7 +51,8 @@ Thumbs.db
 # VS Code
 .vscode
 # logs
-logs
+logs/*
+!logs/.gitkeep
 runs
 
 # other
