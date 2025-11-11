@@ -229,7 +229,12 @@ class SiriusJoyFlat(BaseTask):
     
     def compute_observations(self):
         """ Computes observations
+        
+        Note: 本体感觉观测存储在 self.obs_buf 中（45维），
+              深度图像存储在 self.depth_obs_buf 中（B, 1, H, W）。
+              PPO算法会使用这两个buffer来构建完整的观测（45+32=77维）。
         """
+        # 本体感觉观测 (proprioception): 45维
         self.obs_buf = torch.cat((  self.base_ang_vel  * self.obs_scales.ang_vel, # 3dim
                                     self.projected_gravity, # 3dim
                                     self.commands[:, :3] * self.commands_scale, # 3dim
@@ -245,6 +250,45 @@ class SiriusJoyFlat(BaseTask):
         # add noise if needed
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
+        
+        # 获取深度图像观测 (vision): (num_envs, H, W) → (num_envs, 1, H, W)
+        if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized:
+            try:
+                # 获取深度图 (num_envs, H, W)，已经线性化并clip到[0, max_depth]
+                depth_images = self.get_camera_depth_images(as_torch=True, return_mask=False)
+                
+                # 归一化到 [0, 1]
+                max_depth = float(getattr(self.cfg.camera, 'max_depth', 5.0))
+                depth_normalized = depth_images / max_depth
+                
+                # 添加通道维度: (num_envs, H, W) → (num_envs, 1, H, W)
+                self.depth_obs_buf = depth_normalized.unsqueeze(1)
+                
+            except Exception as e:
+                # 如果相机未初始化或出错，使用零填充
+                if not hasattr(self, '_depth_error_warned'):
+                    print(f"[Warning] Failed to get depth images: {e}")
+                    print("[Warning] Using zero-filled depth buffer as fallback")
+                    self._depth_error_warned = True
+                
+                # 创建零填充的深度buffer
+                h = getattr(self.cfg.camera, 'height', 58)
+                w = getattr(self.cfg.camera, 'width', 87)
+                self.depth_obs_buf = torch.zeros(
+                    self.num_envs, 1, h, w,
+                    dtype=torch.float32,
+                    device=self.device
+                )
+        else:
+            # 相机未启用，使用零填充
+            if not hasattr(self, 'depth_obs_buf'):
+                h = getattr(self.cfg.camera, 'height', 58) if hasattr(self.cfg, 'camera') else 58
+                w = getattr(self.cfg.camera, 'width', 87) if hasattr(self.cfg, 'camera') else 87
+                self.depth_obs_buf = torch.zeros(
+                    self.num_envs, 1, h, w,
+                    dtype=torch.float32,
+                    device=self.device
+                )
 
     def create_sim(self):
         """ Creates simulation, terrain and evironments

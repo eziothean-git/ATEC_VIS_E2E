@@ -62,14 +62,6 @@ from .sirius_diff_vis.sirius_bridge_env import (
     SiriusTwoSpanBridgeCfgPPO,
 )
 
-# 注册新任务：两段桥（如果你想单独用这个名字启动）
-task_registry.register(
-    "sirius_two_span_bridge",
-    SiriusTwoSpanBridge,
-    SiriusTwoSpanBridgeCfg(),
-    SiriusTwoSpanBridgeCfgPPO(),
-)
-
 # 注册统一的 diff_vis 任务名，供 python train.py --task=sirius_diff_vis 使用
 # 这里直接使用两段桥环境
 task_registry.register(

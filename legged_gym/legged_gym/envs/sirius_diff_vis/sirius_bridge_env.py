@@ -3,6 +3,7 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfgPPO
 from legged_gym.envs.sirius_diff_vis.sirius_flat_config import SiriusFlatCfg
 from legged_gym.envs.sirius_diff_vis.sirius_joystick import SiriusJoyFlat
+from .sirius_shared_model import SiriusSharedPPOCfg
 
 
 class SiriusTwoSpanBridgeCfg(SiriusFlatCfg):
@@ -22,11 +23,11 @@ class SiriusTwoSpanBridgeCfg(SiriusFlatCfg):
     """
 
     class env(SiriusFlatCfg.env):
-        # 这里先沿用 flat 的 45 维观测（基础观测），后面如果加 height map 再改
-        num_observations = 45
+        # 观测维度必须与 sirius 任务一致！
+        num_observations = 45  # 本体观测维度 (不包含视觉，视觉通过 depth_obs_buf 单独传递)
         episode_length_s = 30.0
 
-        num_envs = 1
+        num_envs = 1024  # 桥梁场景用较少env
 
     # 初始姿态/关节角沿用 SiriusFlatCfg.init_state
     # 如果你要改起始点（圆半径 0.25 m），可以在这里单独写一个 init_state 覆盖，
@@ -106,25 +107,44 @@ class SiriusTwoSpanBridgeCfg(SiriusFlatCfg):
     # Enable camera for visualization in this diff_vis task by default
     class camera(SiriusFlatCfg.camera):
         enable = True
+        # 继承 SiriusFlatCfg 的相机配置（87x58 分辨率）
         # display every 3 simulation steps (this is in sim steps, not seconds)
         display_interval_steps = 3
         # window name shown by OpenCV
         display_window_name = "sirius_diff_vis_cam"
-        # max depth clipping for normalized depth interface (meters)
-        max_depth = 10.0
+        # max depth 继承自 SiriusFlatCfg.camera (5.0m)
 
 
 class SiriusTwoSpanBridgeCfgPPO(LeggedRobotCfgPPO):
-    """PPO 配置，先给一个比较常规的结构，后面可以再细调。"""
+    """
+    Sirius 两段桥任务的 PPO 训练配置。
+    
+    继承共享模型配置 (SiriusSharedPPOCfg)，确保与 sirius (平地) 任务的网络结构一致。
+    这样可以使用 --resume 从平地训练的权重继续训练。
+    
+    只覆盖 runner 中的任务特定参数（实验名、迭代次数等）。
+    """
+    
+    # 继承共享的 policy 配置（网络结构）- 必须与 sirius 任务完全相同！
+    class policy(SiriusSharedPPOCfg.policy):
+        # 使用共享配置的 [256, 128, 64]
+        # 不要在这里覆盖 actor_hidden_dims 或 critic_hidden_dims！
+        pass
+    
+    # 继承共享的 algorithm 配置（PPO 超参数）
+    class algorithm(SiriusSharedPPOCfg.algorithm):
+        pass
 
-    class policy(LeggedRobotCfgPPO.policy):
-        actor_hidden_dims = [256, 128, 64]
-        critic_hidden_dims = [256, 128, 64]
-        activation = "elu"
-
-    class runner(LeggedRobotCfgPPO.runner):
-        experiment_name = "sirius_two_span_bridge"
+    # 任务特定的 runner 配置
+    class runner(SiriusSharedPPOCfg.runner):
+        experiment_name = "sirius_bridge"  # 阶段2: 桥梁训练
         max_iterations = 1200
+        
+        # Resume 相关配置（从阶段1继续训练时使用）
+        # 使用方法：python train.py --task=sirius_diff_vis --resume
+        # 会自动加载 experiment_name="sirius_flat" 的最新 checkpoint
+        # 如果需要明确指定，可以用 CLI 参数覆盖：
+        # --load_run="Nov11_10-30-45_sirius_flat" --checkpoint=1000
 
 
 class SiriusTwoSpanBridge(SiriusJoyFlat):

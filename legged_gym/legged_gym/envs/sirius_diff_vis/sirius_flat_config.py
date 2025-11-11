@@ -29,12 +29,13 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from .sirius_shared_model import SiriusSharedPPOCfg
 
 class SiriusFlatCfg( LeggedRobotCfg ):
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_actions = 12
-        num_observations = 45
+        num_observations = 45  # 本体观测维度 (不包含视觉，视觉通过 depth_obs_buf 单独传递)
 
     class terrain( LeggedRobotCfg.terrain ):
         mesh_type = 'plane'
@@ -121,23 +122,54 @@ class SiriusFlatCfg( LeggedRobotCfg ):
 
     # camera defaults for sirius
     class camera(LeggedRobotCfg.camera):
-        """深度相机默认配置。设置 enable=True 可开启相机。"""
-        enable = False
+        """深度相机配置 - 用于端到端视觉强化学习"""
+        enable = True  # 启用相机（阶段1和阶段2都需要）
         body_name = "trunk"  # main body link in sirius URDF
         position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
         rpy = [0.0, 0.6, 0.0]  # pitch down ~34 degrees (positive = looking down)
-        width = 160
-        height = 120
+        
+        # 降低分辨率以减少计算负担
+        width = 87  # 原 160 -> 87 (约 0.54x)
+        height = 58  # 原 120 -> 58 (约 0.48x)
         horizontal_fov = 90.0
+        
+        # 深度范围
+        max_depth = 5.0  # 限制在5米以内（桥梁场景足够）
+        near_plane = 0.1
+        far_plane = 10.0
+        
+        # 调试选项（训练时关闭以提高性能）
+        debug_outputs = False
+        use_collision_geometry = False
+        enable_tensors = False
 
 class SiriusFlatCfgPPO( LeggedRobotCfgPPO ):
-    class policy( LeggedRobotCfgPPO.policy ):
-        actor_hidden_dims = [128, 64, 32]
-        critic_hidden_dims = [128, 64, 32]
-        activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
+    """
+    Sirius 平地任务的 PPO 训练配置。
+    
+    继承共享模型配置 (SiriusSharedPPOCfg)，确保与 sirius_diff_vis 任务的网络结构一致。
+    只覆盖 runner 中的任务特定参数（实验名、迭代次数等）。
+    """
+    
+    # 继承共享的 vision_encoder 配置（视觉编码器）
+    class vision_encoder(SiriusSharedPPOCfg.vision_encoder):
+        pass
+    
+    # 继承共享的 policy 配置（网络结构）
+    class policy(SiriusSharedPPOCfg.policy):
+        # 使用共享配置的 [256, 128, 64]
+        # 不要在这里覆盖 actor_hidden_dims 或 critic_hidden_dims！
+        pass
+    
+    # 继承共享的 algorithm 配置（PPO 超参数）
+    class algorithm(SiriusSharedPPOCfg.algorithm):
+        # 降低学习率到 1/4，因为只能跑 1024 envs 而非 4096
+        # 原始: 1.e-3, 现在: 2.5e-4
+        learning_rate = 2.5e-4
 
-    class runner( LeggedRobotCfgPPO.runner ):
+    # 任务特定的 runner 配置
+    class runner(SiriusSharedPPOCfg.runner):
         run_name = ''
-        experiment_name = "sirius_diff_release"
+        experiment_name = "sirius_flat"  # 阶段1: 平地训练
         load_run = -1
         max_iterations = 1200

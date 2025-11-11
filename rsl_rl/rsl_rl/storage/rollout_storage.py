@@ -46,17 +46,31 @@ class RolloutStorage:
             self.action_mean = None
             self.action_sigma = None
             self.hidden_states = None
+            # 新增: 存储深度图像 (用于视觉RL)
+            self.depth_images = None
         
         def clear(self):
             self.__init__()
 
-    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device='cpu'):
-
+    def __init__(self, num_envs, num_transitions_per_env, obs_shape, privileged_obs_shape, actions_shape, device='cpu', depth_image_shape=None):
+        """
+        初始化Rollout存储
+        
+        Args:
+            num_envs: 并行环境数量
+            num_transitions_per_env: 每个环境的transition数量
+            obs_shape: 观测形状 (例如 [45] 表示45维本体观测)
+            privileged_obs_shape: 特权观测形状 (用于critic)
+            actions_shape: 动作形状
+            device: 'cpu' 或 'cuda'
+            depth_image_shape: 深度图像形状 (例如 [1, 58, 87])，如果None则不使用视觉
+        """
         self.device = device
 
         self.obs_shape = obs_shape
         self.privileged_obs_shape = privileged_obs_shape
         self.actions_shape = actions_shape
+        self.depth_image_shape = depth_image_shape  # 新增
 
         # Core
         self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
@@ -67,6 +81,14 @@ class RolloutStorage:
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
+        
+        # 新增: 深度图像存储 (如果使用视觉)
+        # 形状: [num_transitions_per_env, num_envs, 1, H, W]
+        if depth_image_shape is not None:
+            self.depth_images = torch.zeros(num_transitions_per_env, num_envs, *depth_image_shape, device=self.device)
+            print(f"[RolloutStorage] Depth images buffer initialized: {self.depth_images.shape}")
+        else:
+            self.depth_images = None
 
         # For PPO
         self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
@@ -86,10 +108,18 @@ class RolloutStorage:
         self.step = 0
 
     def add_transitions(self, transition: Transition):
+        """
+        添加一个transition到buffer
+        
+        设计说明:
+        - 如果有depth_images buffer且transition中有depth_images，则存储
+        - 兼容旧代码：如果transition没有depth_images也不会报错
+        """
         if self.step >= self.num_transitions_per_env:
             raise AssertionError("Rollout buffer overflow")
         self.observations[self.step].copy_(transition.observations)
-        if self.privileged_observations is not None: self.privileged_observations[self.step].copy_(transition.critic_observations)
+        if self.privileged_observations is not None: 
+            self.privileged_observations[self.step].copy_(transition.critic_observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
@@ -97,6 +127,11 @@ class RolloutStorage:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        
+        # 新增: 存储深度图像 (如果有的话)
+        if self.depth_images is not None and transition.depth_images is not None:
+            self.depth_images[self.step].copy_(transition.depth_images)
+        
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
 
@@ -145,6 +180,16 @@ class RolloutStorage:
         return trajectory_lengths.float().mean(), self.rewards.mean()
 
     def mini_batch_generator(self, num_mini_batches, num_epochs=8):
+        """
+        生成训练用的mini-batch
+        
+        设计说明:
+        1. Flatten: [num_transitions, num_envs, ...] → [batch_size, ...]
+        2. 随机打乱索引进行采样
+        3. 如果有depth_images，也flatten并采样，否则yield None
+        
+        返回值增加 depth_images_batch (最后一个位置)
+        """
         batch_size = self.num_envs * self.num_transitions_per_env
         mini_batch_size = batch_size // num_mini_batches
         indices = torch.randperm(num_mini_batches*mini_batch_size, requires_grad=False, device=self.device)
@@ -162,6 +207,13 @@ class RolloutStorage:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        
+        # 新增: flatten深度图像 (如果有)
+        # 形状: [num_transitions, num_envs, 1, H, W] → [batch_size, 1, H, W]
+        if self.depth_images is not None:
+            depth_images = self.depth_images.flatten(0, 1)
+        else:
+            depth_images = None
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -179,8 +231,13 @@ class RolloutStorage:
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
+                
+                # 新增: 采样深度图像batch (如果有)
+                depth_images_batch = depth_images[batch_idx] if depth_images is not None else None
+                
+                # 注意: depth_images_batch作为最后一个返回值
                 yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
-                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None
+                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None, depth_images_batch
 
     # for RNNs only
     def reccurent_mini_batch_generator(self, num_mini_batches, num_epochs=8):

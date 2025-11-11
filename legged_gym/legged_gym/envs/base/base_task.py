@@ -57,7 +57,15 @@ class BaseTask():
         # graphics device for rendering, -1 for no rendering
         self.graphics_device_id = self.sim_device_id
         if self.headless == True:
-            self.graphics_device_id = -1
+            # Check if camera is needed for observations (e.g., depth images)
+            # If camera is enabled, keep graphics device active even in headless mode
+            needs_camera = (hasattr(cfg, 'camera') and 
+                          getattr(cfg.camera, 'enable', False))
+            if not needs_camera:
+                self.graphics_device_id = -1
+            else:
+                print("[Camera Debug] Headless mode but camera enabled - keeping graphics device active")
+                # Keep graphics_device_id = sim_device_id for camera support
 
         self.num_envs = cfg.env.num_envs
         self.num_obs = cfg.env.num_observations

@@ -78,8 +78,18 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
+    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, depth_image_shape=None):
+        """
+        初始化存储
+        
+        设计说明:
+        - 添加 depth_image_shape 参数用于视觉RL
+        - 向后兼容: 不提供depth_image_shape时行为与原来一致
+        
+        Args:
+            depth_image_shape: 例如 [1, 58, 87] 表示单通道58x87深度图
+        """
+        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device, depth_image_shape)
 
     def test_mode(self):
         self.actor_critic.test()
@@ -87,18 +97,50 @@ class PPO:
     def train_mode(self):
         self.actor_critic.train()
 
-    def act(self, obs, critic_obs):
+    def act(self, obs, critic_obs, depth_obs=None):
+        """
+        选择动作
+        
+        设计说明:
+        - 检查actor_critic是否是VisionProprioceptionActorCritic
+        - 如果是，传递 (obs, depth_obs) 两个参数
+        - 如果不是，只传递 obs（向后兼容）
+        
+        Args:
+            obs: 本体观测 (num_envs, 45) 或完整观测
+            critic_obs: Critic用的观测（可能包含特权信息）
+            depth_obs: 深度图像 (num_envs, 1, H, W)，可选
+        """
         if self.actor_critic.is_recurrent:
             self.transition.hidden_states = self.actor_critic.get_hidden_states()
+        
+        # 判断是否使用视觉输入
+        # 通过检查actor_critic的类名来判断
+        from rsl_rl.modules.vision_actor_critic import VisionProprioceptionActorCritic
+        is_vision_policy = isinstance(self.actor_critic, VisionProprioceptionActorCritic)
+        
         # Compute the actions and values
-        self.transition.actions = self.actor_critic.act(obs).detach()
-        self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+        if is_vision_policy and depth_obs is not None:
+            # 视觉策略: 传递本体+深度
+            self.transition.actions = self.actor_critic.act(obs, depth_obs).detach()
+            self.transition.values = self.actor_critic.evaluate(obs, depth_obs).detach()
+        else:
+            # 标准策略: 只传递观测
+            self.transition.actions = self.actor_critic.act(obs).detach()
+            self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+        
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
+        
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
+        
+        # 新增: 记录深度图像
+        if depth_obs is not None:
+            self.transition.depth_images = depth_obs
+        
         return self.transition.actions
     
     def process_env_step(self, rewards, dones, infos):
@@ -113,24 +155,60 @@ class PPO:
         self.transition.clear()
         self.actor_critic.reset(dones)
     
-    def compute_returns(self, last_critic_obs):
-        last_values= self.actor_critic.evaluate(last_critic_obs).detach()
+    def compute_returns(self, last_critic_obs, last_depth_obs=None):
+        """
+        计算returns (用于优势函数)
+        
+        设计说明:
+        - 如果是视觉策略，需要传递last_depth_obs
+        - 否则按原来的方式计算
+        """
+        from rsl_rl.modules.vision_actor_critic import VisionProprioceptionActorCritic
+        is_vision_policy = isinstance(self.actor_critic, VisionProprioceptionActorCritic)
+        
+        if is_vision_policy and last_depth_obs is not None:
+            last_values = self.actor_critic.evaluate(last_critic_obs, last_depth_obs).detach()
+        else:
+            last_values = self.actor_critic.evaluate(last_critic_obs).detach()
+        
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
     def update(self):
+        """
+        PPO更新
+        
+        设计说明:
+        - mini_batch_generator现在返回12个值（最后一个是depth_images_batch）
+        - 如果是视觉策略，在act/evaluate时传递depth_images_batch
+        - 否则按原来的方式处理
+        """
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        
+        # 检查是否是视觉策略
+        from rsl_rl.modules.vision_actor_critic import VisionProprioceptionActorCritic
+        is_vision_policy = isinstance(self.actor_critic, VisionProprioceptionActorCritic)
+        
         if self.actor_critic.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        
         for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, depth_images_batch in generator:
 
-
-                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                # 计算新的动作分布
+                if is_vision_policy and depth_images_batch is not None:
+                    # 视觉策略: 传递深度图像
+                    self.actor_critic.act(obs_batch, depth_images_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+                    actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
+                    value_batch = self.actor_critic.evaluate(critic_obs_batch, depth_images_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                else:
+                    # 标准策略
+                    self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+                    actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
+                    value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+                
                 mu_batch = self.actor_critic.action_mean
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy

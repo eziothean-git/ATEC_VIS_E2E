@@ -38,6 +38,7 @@ import torch
 
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
+from rsl_rl.modules.vision_actor_critic import VisionProprioceptionActorCritic
 from rsl_rl.env import VecEnv
 
 
@@ -58,18 +59,73 @@ class OnPolicyRunner:
             num_critic_obs = self.env.num_privileged_obs 
         else:
             num_critic_obs = self.env.num_obs
-        actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
-        actor_critic: ActorCritic = actor_critic_class( self.env.num_obs,
-                                                        num_critic_obs,
-                                                        self.env.num_actions,
-                                                        **self.policy_cfg).to(self.device)
+        
+        # 判断是否使用视觉输入
+        use_vision = self.policy_cfg.get('use_vision', False)
+        
+        actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic or VisionProprioceptionActorCritic
+        
+        # 根据policy类型选择不同的初始化方式
+        if use_vision and actor_critic_class.__name__ == 'VisionProprioceptionActorCritic':
+            # 视觉-本体融合模式
+            # num_obs应该是 num_proprio_obs + vision_latent_dim
+            # 我们需要从train_cfg中获取vision_encoder配置
+            vision_encoder_cfg_dict = train_cfg.get("vision_encoder", None)
+            if vision_encoder_cfg_dict is None:
+                raise ValueError("VisionProprioceptionActorCritic requires vision_encoder config")
+            
+            # 将字典转换为对象（简单的命名空间）
+            # 这样VisionProprioceptionActorCritic可以用 cfg.latent_dim 访问
+            class VisionEncoderCfg:
+                def __init__(self, cfg_dict):
+                    for key, value in cfg_dict.items():
+                        setattr(self, key, value)
+            
+            vision_encoder_cfg = VisionEncoderCfg(vision_encoder_cfg_dict)
+            
+            # env.num_obs 已经是本体观测维度（不包含视觉）
+            # 视觉特征通过 depth_obs_buf 单独传递
+            vision_latent_dim = self.policy_cfg.get('vision_latent_dim', 32)
+            num_proprio_obs = self.env.num_obs  # 直接使用，不需要减去 vision_latent_dim
+            
+            print(f"\n[OnPolicyRunner] Creating VisionProprioceptionActorCritic:")
+            print(f"  num_proprio_obs: {num_proprio_obs}")
+            print(f"  num_vision_latent: {vision_latent_dim}")
+            print(f"  num_actions: {self.env.num_actions}")
+            
+            # 创建视觉融合Actor-Critic
+            actor_critic = actor_critic_class(
+                num_proprio_obs=num_proprio_obs,
+                num_vision_latent=vision_latent_dim,
+                num_actions=self.env.num_actions,
+                vision_encoder_cfg=vision_encoder_cfg,
+                **self.policy_cfg
+            ).to(self.device)
+        else:
+            # 标准模式（不使用视觉）
+            actor_critic = actor_critic_class(
+                self.env.num_obs,
+                num_critic_obs,
+                self.env.num_actions,
+                **self.policy_cfg
+            ).to(self.device)
+        
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions])
+        # 检查是否需要存储深度图像
+        depth_image_shape = None
+        if use_vision and hasattr(self.env.cfg, 'camera') and self.env.cfg.camera.enable:
+            # 深度图像形状: [1, H, W]
+            depth_image_shape = [1, self.env.cfg.camera.height, self.env.cfg.camera.width]
+            print(f"[OnPolicyRunner] Depth image storage enabled: {depth_image_shape}")
+        
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, 
+                             [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions],
+                             depth_image_shape=depth_image_shape)
 
         # Log
         self.log_dir = log_dir
@@ -81,15 +137,30 @@ class OnPolicyRunner:
         _, _ = self.env.reset()
     
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
+        """
+        主训练循环
+        
+        设计说明:
+        - 检查环境是否提供depth_obs_buf
+        - 如果有，在rollout时获取并传递给PPO
+        - 在compute_returns时也传递last_depth_obs
+        """
         # initialize writer
         if self.log_dir is not None and self.writer is None:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
+        
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
+        
+        # 检查环境是否有depth_obs_buf（由compute_observations生成）
+        use_depth = hasattr(self.env, 'depth_obs_buf') and self.env.depth_obs_buf is not None
+        if use_depth:
+            print(f"[OnPolicyRunner] Using depth observations: {self.env.depth_obs_buf.shape}")
+        
         self.alg.actor_critic.train() # switch to train mode (for dropout for example)
 
         ep_infos = []
@@ -104,7 +175,12 @@ class OnPolicyRunner:
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
-                    actions = self.alg.act(obs, critic_obs)
+                    # 获取深度观测（如果有）
+                    depth_obs = self.env.depth_obs_buf.to(self.device) if use_depth else None
+                    
+                    # 调用PPO的act方法
+                    actions = self.alg.act(obs, critic_obs, depth_obs)
+                    
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
@@ -127,7 +203,9 @@ class OnPolicyRunner:
 
                 # Learning step
                 start = stop
-                self.alg.compute_returns(critic_obs)
+                # 获取最后一步的深度观测（用于bootstrap）
+                last_depth_obs = self.env.depth_obs_buf.to(self.device) if use_depth else None
+                self.alg.compute_returns(critic_obs, last_depth_obs)
             
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
