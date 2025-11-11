@@ -166,6 +166,18 @@ class SiriusFlatCfgPPO( LeggedRobotCfgPPO ):
         # 降低学习率到 1/4，因为只能跑 1024 envs 而非 4096
         # 原始: 1.e-3, 现在: 2.5e-4
         learning_rate = 2.5e-4
+        
+        # GPU 利用率优化：增加学习轮数补偿环境数减少
+        # 原始 5 epochs * 4096 envs = 20480 samples/update
+        # 现在 8 epochs * 1024 envs = 8192 samples/update (仍少于原始)
+        # 但能提高学习阶段的 GPU 利用率
+        num_learning_epochs = 8  # 从 5 增加到 8
+        
+        # 可选：减少 mini_batches 以增加每批的大小
+        # mini_batch_size = (num_envs * num_steps_per_env) / num_mini_batches
+        # 原始: (4096 * 24) / 4 = 24576
+        # 现在: (1024 * 24) / 2 = 12288 (更大的批量利用 GPU)
+        num_mini_batches = 2  # 从 4 减少到 2
 
     # 任务特定的 runner 配置
     class runner(SiriusSharedPPOCfg.runner):
