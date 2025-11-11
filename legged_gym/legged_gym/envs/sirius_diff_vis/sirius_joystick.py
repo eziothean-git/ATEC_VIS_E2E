@@ -257,6 +257,13 @@ class SiriusJoyFlat(BaseTask):
                 # 获取深度图 (num_envs, H, W)，已经线性化并clip到[0, max_depth]
                 depth_images = self.get_camera_depth_images(as_torch=True, return_mask=False)
                 
+                # Debug: Log camera configuration on first call
+                if not hasattr(self, '_camera_obs_logged'):
+                    enable_tensors = getattr(self.cfg.camera, 'enable_tensors', False)
+                    print(f"[Compute Obs] Camera enable_tensors={enable_tensors}")
+                    print(f"[Compute Obs] Depth device={depth_images.device}, shape={depth_images.shape}, dtype={depth_images.dtype}")
+                    self._camera_obs_logged = True
+                
                 # 归一化到 [0, 1]
                 max_depth = float(getattr(self.cfg.camera, 'max_depth', 5.0))
                 depth_normalized = depth_images / max_depth
@@ -685,9 +692,13 @@ class SiriusJoyFlat(BaseTask):
         cam_props.width = int(self.cfg.camera.width)
         cam_props.height = int(self.cfg.camera.height)
         cam_props.horizontal_fov = float(self.cfg.camera.horizontal_fov)
-        cam_props.use_collision_geometry = False
-        cam_props.enable_tensors = False
+        cam_props.use_collision_geometry = bool(getattr(self.cfg.camera, 'use_collision_geometry', False))
+        # ⚠️ CRITICAL: Must enable tensors here for GPU tensor API to work!
+        cam_props.enable_tensors = bool(getattr(self.cfg.camera, 'enable_tensors', False))
         self.camera_props = cam_props
+        
+        # Debug: Log camera properties
+        print(f"[Camera Init] enable_tensors={cam_props.enable_tensors}, use_collision_geometry={cam_props.use_collision_geometry}")
 
         # find body index to attach to
         target_body_name = getattr(self.cfg.camera, 'body_name', None)
@@ -726,91 +737,150 @@ class SiriusJoyFlat(BaseTask):
 
     def get_camera_depth_images(self, as_torch: bool = True, return_mask: bool = False):
         """Render and return stacked depth images from all env cameras.
-        Returns a tensor/ndarray of shape (num_envs, H, W).
-
-        Args:
-            as_torch (bool): If True, returns a torch tensor; otherwise, returns a numpy array.
+        Returns a tensor/ndarray of shape (num_envs, H, W). Depth is in meters.
+        
+        GPU-optimized version: Uses GPU tensor API when cfg.camera.enable_tensors=True
+        to avoid CPU-GPU transfers.
         """
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
 
-        # ensure graphics are stepped so camera images are updated
+        # Ensure graphics are stepped and sensors rendered
         self.gym.step_graphics(self.sim)
         self.gym.render_all_camera_sensors(self.sim)
 
-        imgs = []
-        for i in range(self.num_envs):
-            depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-            imgs.append(depth.astype('float32'))
-        import numpy as _np
-
-        # raw renderer buffer
-        arr_raw = _np.stack(imgs, axis=0)
-
-        # prepare linearized depth and hit mask
-        arr_linear = arr_raw.copy().astype('float32')
-        hit_mask = _np.isfinite(arr_raw)
-
-        try:
-            arr_max = float(_np.nanmax(arr_raw))
-            arr_min = float(_np.nanmin(arr_raw))
-        except Exception:
-            arr_max = 1.0
-            arr_min = 0.0
-
-        max_depth = float(getattr(self.cfg.camera, 'max_depth', 10.0))
-        if arr_max <= 1.01 and arr_min >= -0.01:
-            near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
-            far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
-            ndc = arr_raw * 2.0 - 1.0
-            denom = (far + near - ndc * (far - near))
-            with _np.errstate(divide='ignore', invalid='ignore'):
-                z = (2.0 * near * far) / denom
-            arr_linear = _np.abs(z.astype('float32'))
-        else:
-            with _np.errstate(invalid='ignore'):
-                arr_linear = _np.abs(arr_raw)
-
-        arr_linear[~_np.isfinite(arr_linear)] = max_depth
-        arr_linear = _np.clip(arr_linear, 0.0, max_depth)
-
-        # save debug artifacts if enabled in config
-        try:
-            if getattr(self.cfg.camera, 'debug_outputs', False):
-                import os as _os
-                out_dir = _os.path.join('/home', 'eziothean', 'Sirius_RL_Gym-master', 'legged_gym', 'legged_gym', 'scripts', 'camera_outputs')
-                _np.save(_os.path.join(out_dir, 'depth_raw_renderer_latest.npy'), arr_raw[0] if arr_raw.shape[0] == 1 else arr_raw)
-                _np.save(_os.path.join(out_dir, 'depth_linearized_latest.npy'), arr_linear[0] if arr_linear.shape[0] == 1 else arr_linear)
-                _np.save(_os.path.join(out_dir, 'depth_mask_latest.npy'), hit_mask[0] if hit_mask.shape[0] == 1 else hit_mask)
-        except Exception:
-            pass
-
-        arr = arr_linear
-
-        if as_torch:
+        H = int(self.camera_props.height)
+        W = int(self.camera_props.width)
+        max_depth = float(getattr(self.cfg.camera, 'max_depth', getattr(self.cfg.camera, 'far_plane', 10.0)))
+        created = len(getattr(self, 'camera_handles', []))
+        
+        # Check if we should use GPU tensor API (faster, no CPU-GPU transfer)
+        use_tensor_api = getattr(self.cfg.camera, 'enable_tensors', False) and as_torch
+        
+        # Debug: Print which path is being used (only once)
+        if not hasattr(self, '_depth_path_logged'):
+            enable_tensors_config = getattr(self.cfg.camera, 'enable_tensors', False)
+            print(f"[Camera Debug] enable_tensors={enable_tensors_config}, as_torch={as_torch}, use_tensor_api={use_tensor_api}")
+            print(f"[Camera Debug] Using {'GPU tensor path (FAST) ✅' if use_tensor_api else 'CPU/NumPy path (SLOW) ⚠️'}")
+            self._depth_path_logged = True
+        
+        if use_tensor_api:
+            # ========== GPU Tensor Path (Optimized) ==========
             import torch as _torch
-            t = _torch.from_numpy(arr)
+            from isaacgym import gymtorch
+            
+            # Get camera image tensors directly on GPU (zero-copy!)
+            imgs = []
+            for i in range(self.num_envs):
+                if i < created:
+                    # Get tensor directly on GPU (no CPU transfer!)
+                    depth_tensor = self.gym.get_camera_image_gpu_tensor(
+                        self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH
+                    )
+                    # Wrap as PyTorch tensor (zero-copy view)
+                    depth_torch = gymtorch.wrap_tensor(depth_tensor)
+                    imgs.append(depth_torch)
+                else:
+                    # Placeholder for envs without cameras
+                    device = self.device if hasattr(self, 'device') else 'cuda:0'
+                    imgs.append(_torch.full((H, W), max_depth, dtype=_torch.float32, device=device))
+            
+            # Stack on GPU (no CPU involved!)
+            arr_raw = _torch.stack(imgs, dim=0)  # [num_envs, H, W]
+            
+            # Process on GPU
+            arr_linear = arr_raw.clone()
+            hit_mask = _torch.isfinite(arr_raw)
+            
+            # Check if normalized depth [0,1] (use torch operations that work in PyTorch 1.13)
+            finite_mask = _torch.isfinite(arr_raw)
+            if finite_mask.any():
+                arr_max = arr_raw[finite_mask].max().item()
+                arr_min = arr_raw[finite_mask].min().item()
+            else:
+                arr_max = 1.0
+                arr_min = 0.0
+            
+            if arr_max <= 1.01 and arr_min >= -0.01:
+                # Convert normalized depth to linear depth
+                near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
+                far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
+                
+                ndc = arr_raw * 2.0 - 1.0
+                denom = (far + near - ndc * (far - near))
+                
+                # Avoid division by zero
+                mask = _torch.abs(denom) > 1e-6
+                z = _torch.zeros_like(arr_raw)
+                z[mask] = (2.0 * near * far) / denom[mask]
+                arr_linear = _torch.abs(z)
+            else:
+                arr_linear = _torch.abs(arr_raw)
+            
+            # Handle infinities and clip
+            arr_linear[~_torch.isfinite(arr_linear)] = max_depth
+            arr_linear = _torch.clamp(arr_linear, 0.0, max_depth)
+            
+            if return_mask:
+                return arr_linear, hit_mask
+            return arr_linear
+            
+        else:
+            # ========== CPU/NumPy Path (Legacy, for compatibility) ==========
+            import numpy as _np
+            
+            imgs = []
+            for i in range(self.num_envs):
+                if i < created:
+                    depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                    imgs.append(depth.astype('float32'))
+                else:
+                    imgs.append(_np.full((H, W), max_depth, dtype='float32'))
+            
+            # Stack on CPU
+            arr_raw = _np.stack(imgs, axis=0)
+            
+            # Process on CPU
+            arr_linear = arr_raw.copy().astype('float32')
+            hit_mask = _np.isfinite(arr_raw)
+            
             try:
-                t = t.to(_torch.get_default_dtype())
+                arr_max = float(_np.nanmax(arr_raw))
+                arr_min = float(_np.nanmin(arr_raw))
             except Exception:
-                pass
-            try:
+                arr_max = 1.0
+                arr_min = 0.0
+            
+            if arr_max <= 1.01 and arr_min >= -0.01:
+                near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
+                far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
+                ndc = arr_raw * 2.0 - 1.0
+                denom = (far + near - ndc * (far - near))
+                with _np.errstate(divide='ignore', invalid='ignore'):
+                    z = (2.0 * near * far) / denom
+                arr_linear = _np.abs(z.astype('float32'))
+            else:
+                with _np.errstate(invalid='ignore'):
+                    arr_linear = _np.abs(arr_raw)
+            
+            arr_linear[~_np.isfinite(arr_linear)] = max_depth
+            arr_linear = _np.clip(arr_linear, 0.0, max_depth)
+            
+            if as_torch:
+                import torch as _torch
+                t = _torch.from_numpy(arr_linear)
+                t = t.to(_torch.get_default_dtype())
                 device = self.device if hasattr(self, 'device') else 'cpu'
                 t = t.to(device)
-            except Exception:
-                pass
-            if return_mask:
-                m = _torch.from_numpy(hit_mask.astype('bool'))
-                try:
-                    m = m.to(device)
-                except Exception:
-                    pass
-                return t, m
-            return t
-        else:
-            if return_mask:
-                return arr, hit_mask
-            return arr
+                
+                if return_mask:
+                    m = _torch.from_numpy(hit_mask.astype('bool')).to(device)
+                    return t, m
+                return t
+            else:
+                if return_mask:
+                    return arr_linear, hit_mask
+                return arr_linear
 
     def get_camera_rgb_images(self, as_torch: bool = False, to_bgr: bool = True):
         """Render and return stacked RGB images from all env cameras.

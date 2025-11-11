@@ -141,7 +141,11 @@ class SiriusFlatCfg( LeggedRobotCfg ):
         # 调试选项（训练时关闭以提高性能）
         debug_outputs = False
         use_collision_geometry = False
-        enable_tensors = False
+        
+        # ⚠️ 性能关键：使用 GPU tensor 路径避免 CPU-GPU 传输
+        # enable_tensors = True 会直接在 GPU 上生成深度图 tensor
+        # 避免 CPU → NumPy → PyTorch → GPU 的转换链
+        enable_tensors = True  # ✅ 启用 GPU tensor 路径
 
 class SiriusFlatCfgPPO( LeggedRobotCfgPPO ):
     """
@@ -184,4 +188,4 @@ class SiriusFlatCfgPPO( LeggedRobotCfgPPO ):
         run_name = ''
         experiment_name = "sirius_flat"  # 阶段1: 平地训练
         load_run = -1
-        max_iterations = 1200
+        max_iterations = 1800

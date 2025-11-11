@@ -893,6 +893,9 @@ class LeggedRobot(BaseTask):
     def get_camera_depth_images(self, as_torch: bool = True, return_mask: bool = False):
         """Render and return stacked depth images from all env cameras.
         Returns a tensor/ndarray of shape (num_envs, H, W). Depth is in meters; far plane returns -inf or large values depending on Gym version.
+        
+        Performance optimization: When cfg.camera.enable_tensors=True, uses GPU tensor API
+        to avoid CPU-GPU transfers.
         """
         # Backwards-compatible wrapper: normalized, clipped and optionally returned on a torch device.
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
@@ -902,97 +905,158 @@ class LeggedRobot(BaseTask):
         self.gym.step_graphics(self.sim)
         self.gym.render_all_camera_sensors(self.sim)
 
-        import numpy as _np
-        imgs = []
-
-        # depth shape expected (H, W)
         H = int(self.camera_props.height)
         W = int(self.camera_props.width)
         max_depth = float(getattr(self.cfg.camera, 'max_depth', getattr(self.cfg.camera, 'far_plane', 10.0)))
-
-        # iterate through all envs; if we didn't create a camera for some env, return a placeholder depth (max_depth)
         created = len(getattr(self, 'camera_handles', []))
-        for i in range(self.num_envs):
-            if i < created:
-                depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
-                imgs.append(depth.astype('float32'))
-            else:
-                # placeholder: far plane (max depth)
-                imgs.append(_np.full((H, W), max_depth, dtype='float32'))
-
-        # raw renderer buffer (before any processing)
-        arr_raw = _np.stack(imgs, axis=0)
-
-        # Prepare linearized depth in meters and hit mask
-        arr_linear = arr_raw.copy().astype('float32')
-        hit_mask = _np.isfinite(arr_raw)
-
-        # If renderer returns normalized depth [0,1], convert using near/far
-        try:
-            arr_max = float(_np.nanmax(arr_raw))
-            arr_min = float(_np.nanmin(arr_raw))
-        except Exception:
-            arr_max = 1.0
-            arr_min = 0.0
-
-        if arr_max <= 1.01 and arr_min >= -0.01:
-            near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
-            far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
-            ndc = arr_raw * 2.0 - 1.0
-            denom = (far + near - ndc * (far - near))
-            with _np.errstate(divide='ignore', invalid='ignore'):
-                z = (2.0 * near * far) / denom
-            arr_linear = _np.abs(z.astype('float32'))
-        else:
-            # renderer appears to return view-space z (negative in front of camera)
-            # take absolute value to get positive depth in meters
-            with _np.errstate(invalid='ignore'):
-                arr_linear = _np.abs(arr_raw)
-
-        # replace -inf/nan with max_depth in the linearized copy (but keep hit_mask)
-        arr_linear[~_np.isfinite(arr_linear)] = max_depth
-        arr_linear = _np.clip(arr_linear, 0.0, max_depth)
-
-        # Try to save debugging artifacts (non-fatal) if enabled in config
-        try:
-            if getattr(self.cfg.camera, 'debug_outputs', False):
-                import os as _os
-                out_dir = _os.path.join('/home', 'eziothean', 'Sirius_RL_Gym-master', 'legged_gym', 'legged_gym', 'scripts', 'camera_outputs')
-                _np.save(_os.path.join(out_dir, 'depth_raw_renderer_latest.npy'), arr_raw[0] if arr_raw.shape[0] == 1 else arr_raw)
-                _np.save(_os.path.join(out_dir, 'depth_linearized_latest.npy'), arr_linear[0] if arr_linear.shape[0] == 1 else arr_linear)
-                _np.save(_os.path.join(out_dir, 'depth_mask_latest.npy'), hit_mask[0] if hit_mask.shape[0] == 1 else hit_mask)
-        except Exception:
-            pass
-
-        # Returned array (backwards compatible): use linearized depths
-        arr = arr_linear
-
-        if as_torch:
+        
+        # Check if we should use GPU tensor API (faster, no CPU-GPU transfer)
+        use_tensor_api = getattr(self.cfg.camera, 'enable_tensors', False) and as_torch
+        
+        # Debug: Print which path is being used (only print once)
+        if not hasattr(self, '_depth_path_logged'):
+            enable_tensors_config = getattr(self.cfg.camera, 'enable_tensors', False)
+            print(f"[Camera Debug] enable_tensors={enable_tensors_config}, as_torch={as_torch}, use_tensor_api={use_tensor_api}")
+            print(f"[Camera Debug] Using {'GPU tensor path (FAST)' if use_tensor_api else 'CPU/NumPy path (SLOW)'}")
+            self._depth_path_logged = True
+        
+        if use_tensor_api:
+            # ========== GPU Tensor Path (Optimized) ==========
             import torch as _torch
-            t = _torch.from_numpy(arr)
-            # ensure float dtype
-            try:
-                t = t.to(_torch.get_default_dtype())
-            except Exception:
-                pass
-            # put on device used by the environment (useful for policy observations)
-            try:
-                device = self.device if hasattr(self, 'device') else 'cpu'
-                t = t.to(device)
-            except Exception:
-                pass
+            
+            # Get camera image tensors directly on GPU
+            imgs = []
+            for i in range(self.num_envs):
+                if i < created:
+                    # Get tensor directly on GPU (no CPU transfer!)
+                    depth_tensor = self.gym.get_camera_image_gpu_tensor(
+                        self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH
+                    )
+                    # Wrap as PyTorch tensor (zero-copy view)
+                    depth_torch = gymtorch.wrap_tensor(depth_tensor)
+                    imgs.append(depth_torch)
+                else:
+                    # Placeholder for envs without cameras
+                    device = self.device if hasattr(self, 'device') else 'cuda:0'
+                    imgs.append(_torch.full((H, W), max_depth, dtype=_torch.float32, device=device))
+            
+            # Stack on GPU (no CPU involved!)
+            arr_raw = _torch.stack(imgs, dim=0)  # [num_envs, H, W]
+            
+            # Process on GPU
+            arr_linear = arr_raw.clone()
+            hit_mask = _torch.isfinite(arr_raw)
+            
+            # Check if normalized depth [0,1]
+            arr_max = _torch.nanmax(arr_raw).item() if arr_raw.numel() > 0 else 1.0
+            arr_min = _torch.nanmin(arr_raw).item() if arr_raw.numel() > 0 else 0.0
+            
+            if arr_max <= 1.01 and arr_min >= -0.01:
+                # Convert normalized depth to linear depth
+                near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
+                far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
+                ndc = arr_raw * 2.0 - 1.0
+                denom = (far + near - ndc * (far - near))
+                z = (2.0 * near * far) / denom.clamp(min=1e-6)  # Avoid division by zero
+                arr_linear = _torch.abs(z)
+            else:
+                arr_linear = _torch.abs(arr_raw)
+            
+            # Replace inf/nan with max_depth
+            arr_linear = _torch.where(_torch.isfinite(arr_linear), arr_linear, 
+                                     _torch.tensor(max_depth, device=arr_linear.device))
+            arr_linear = _torch.clamp(arr_linear, 0.0, max_depth)
+            
+            # Return GPU tensors (no CPU transfer!)
             if return_mask:
-                m = _torch.from_numpy(hit_mask.astype('bool'))
+                return arr_linear, hit_mask
+            return arr_linear
+        
+        else:
+            # ========== CPU/NumPy Path (Legacy, slower) ==========
+            import numpy as _np
+            imgs = []
+
+            for i in range(self.num_envs):
+                if i < created:
+                    depth = self.gym.get_camera_image(self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH)
+                    imgs.append(depth.astype('float32'))
+                else:
+                    imgs.append(_np.full((H, W), max_depth, dtype='float32'))
+
+            # raw renderer buffer (before any processing)
+            arr_raw = _np.stack(imgs, axis=0)
+
+            # Prepare linearized depth in meters and hit mask
+            arr_linear = arr_raw.copy().astype('float32')
+            hit_mask = _np.isfinite(arr_raw)
+
+            # If renderer returns normalized depth [0,1], convert using near/far
+            try:
+                arr_max = float(_np.nanmax(arr_raw))
+                arr_min = float(_np.nanmin(arr_raw))
+            except Exception:
+                arr_max = 1.0
+                arr_min = 0.0
+
+            if arr_max <= 1.01 and arr_min >= -0.01:
+                near = float(getattr(self.cfg.camera, 'near_plane', getattr(self.cfg.camera, 'near', 0.05)))
+                far = float(getattr(self.cfg.camera, 'far_plane', getattr(self.cfg.camera, 'far', 10.0)))
+                ndc = arr_raw * 2.0 - 1.0
+                denom = (far + near - ndc * (far - near))
+                with _np.errstate(divide='ignore', invalid='ignore'):
+                    z = (2.0 * near * far) / denom
+                arr_linear = _np.abs(z.astype('float32'))
+            else:
+                # renderer appears to return view-space z (negative in front of camera)
+                # take absolute value to get positive depth in meters
+                with _np.errstate(invalid='ignore'):
+                    arr_linear = _np.abs(arr_raw)
+
+            # replace -inf/nan with max_depth in the linearized copy (but keep hit_mask)
+            arr_linear[~_np.isfinite(arr_linear)] = max_depth
+            arr_linear = _np.clip(arr_linear, 0.0, max_depth)
+
+            # Try to save debugging artifacts (non-fatal) if enabled in config
+            try:
+                if getattr(self.cfg.camera, 'debug_outputs', False):
+                    import os as _os
+                    out_dir = _os.path.join('/home', 'eziothean', 'Sirius_RL_Gym-master', 'legged_gym', 'legged_gym', 'scripts', 'camera_outputs')
+                    _np.save(_os.path.join(out_dir, 'depth_raw_renderer_latest.npy'), arr_raw[0] if arr_raw.shape[0] == 1 else arr_raw)
+                    _np.save(_os.path.join(out_dir, 'depth_linearized_latest.npy'), arr_linear[0] if arr_linear.shape[0] == 1 else arr_linear)
+                    _np.save(_os.path.join(out_dir, 'depth_mask_latest.npy'), hit_mask[0] if hit_mask.shape[0] == 1 else hit_mask)
+            except Exception:
+                pass
+
+            # Returned array (backwards compatible): use linearized depths
+            arr = arr_linear
+
+            if as_torch:
+                import torch as _torch
+                t = _torch.from_numpy(arr)  # CPU → GPU transfer happens here!
+                # ensure float dtype
                 try:
-                    m = m.to(device)
+                    t = t.to(_torch.get_default_dtype())
                 except Exception:
                     pass
-                return t, m
-            return t
-        else:
-            if return_mask:
-                return arr, hit_mask
-            return arr
+                # put on device used by the environment (useful for policy observations)
+                try:
+                    device = self.device if hasattr(self, 'device') else 'cpu'
+                    t = t.to(device)  # CPU → GPU transfer!
+                except Exception:
+                    pass
+                if return_mask:
+                    m = _torch.from_numpy(hit_mask.astype('bool'))
+                    try:
+                        m = m.to(device)
+                    except Exception:
+                        pass
+                    return t, m
+                return t
+            else:
+                if return_mask:
+                    return arr, hit_mask
+                return arr
 
     def get_camera_rgb_images(self, as_torch: bool = False, to_bgr: bool = True):
         """Render and return stacked RGB images from all env cameras.
