@@ -52,6 +52,13 @@ class VisionProprioceptionActorCritic(ActorCritic):
                  critic_hidden_dims=[256, 128, 64],
                  activation='elu',
                  init_noise_std=1.0,
+                 # 🎬 FiLM 门控参数（从 policy 配置传入）
+                 use_film_gating=True,
+                 film_hidden_dims=[64],
+                 film_activation='elu',
+                 film_scale_init=0.0,
+                 film_shift_init=0.0,
+                 film_scale_limit=0.1,
                  **kwargs):
         
         # 存储维度信息
@@ -83,6 +90,45 @@ class VisionProprioceptionActorCritic(ActorCritic):
             dropout=vision_encoder_cfg.dropout
         )
         
+        # 🎬 构建 FiLM 门控网络（Feature-wise Linear Modulation）
+        # FiLM 参数直接从函数参数获取（由 build_vision_actor_critic 从 cfg.policy 传入）
+        self.use_film = use_film_gating
+        self.film_scale_limit = film_scale_limit
+        
+        if self.use_film:
+            # 获取激活函数
+            film_act = get_activation(film_activation)
+            
+            # 构建门控 MLP: vision_latent (32) -> [64] -> scale (45) + shift (45)
+            # 输出维度是 2 * num_proprio_obs，前半部分是 scale，后半部分是 shift
+            dims = [self.num_vision_latent] + film_hidden_dims + [2 * self.num_proprio_obs]
+            layers = []
+            
+            # 隐藏层：添加线性层 + 激活函数
+            for i in range(len(dims) - 2):
+                layers += [nn.Linear(dims[i], dims[i+1]), film_act]
+            
+            # 输出层：只有线性层，不加激活函数（因为 scale 和 shift 需要不同的处理）
+            layers += [nn.Linear(dims[-2], dims[-1])]
+            
+            self.film_mlp = nn.Sequential(*layers)
+            
+            # 🔧 关键：零初始化输出层，确保训练初期是恒等映射
+            # 这样初期 scale ≈ 0, shift ≈ 0，modulated_proprio ≈ proprio
+            # 网络可以从"纯 concat"的稳定状态开始，逐步学习门控
+            nn.init.zeros_(self.film_mlp[-1].weight)
+            nn.init.zeros_(self.film_mlp[-1].bias)
+            
+            print(f"\n[FiLM Gating Module] Enabled")
+            print(f"  Input dim: {self.num_vision_latent} (vision latent)")
+            print(f"  Hidden dims: {film_hidden_dims}")
+            print(f"  Output dim: {2 * self.num_proprio_obs} (scale + shift)")
+            print(f"  Scale limit: ±{self.film_scale_limit} (via tanh)")
+            print(f"  Activation: {film_activation}")
+        else:
+            self.film_mlp = None
+            print(f"\n[FiLM Gating Module] Disabled (using simple concatenation)")
+        
         print(f"\n[VisionProprioceptionActorCritic]")
         print(f"  Proprio obs dim: {num_proprio_obs}")
         print(f"  Vision latent dim: {num_vision_latent}")
@@ -92,6 +138,12 @@ class VisionProprioceptionActorCritic(ActorCritic):
     def _fuse_observations(self, proprio_obs, depth_image):
         """
         融合本体观测和视觉特征
+        
+        使用 FiLM (Feature-wise Linear Modulation) 门控机制：
+        1. 视觉编码器提取视觉特征
+        2. 门控 MLP 从视觉特征生成 scale 和 shift
+        3. 使用 scale 和 shift 调制本体特征：modulated = proprio * (1 + scale) + shift
+        4. 拼接调制后的本体特征和视觉特征
         
         Args:
             proprio_obs: (B, num_proprio_obs) 本体感觉观测
@@ -103,8 +155,27 @@ class VisionProprioceptionActorCritic(ActorCritic):
         # 编码视觉输入
         vision_latent = self.vision_encoder(depth_image)  # (B, num_vision_latent)
         
-        # 拼接本体和视觉特征
-        fused_obs = torch.cat([proprio_obs, vision_latent], dim=-1)  # (B, num_fused_obs)
+        if self.use_film:
+            # 🎬 FiLM 门控调制
+            # 1. 使用门控 MLP 从视觉特征生成 scale 和 shift
+            film_out = self.film_mlp(vision_latent)  # (B, 2 * num_proprio_obs)
+            scale, shift = torch.split(film_out, self.num_proprio_obs, dim=-1)  # (B, P), (B, P)
+            
+            # 2. 使用 tanh 将 scale 限制在 ±film_scale_limit 范围内
+            #    这样可以避免训练初期的梯度爆炸，保证数值稳定性
+            #    例如：film_scale_limit=0.1，则 scale ∈ [-0.1, 0.1]
+            scale = self.film_scale_limit * torch.tanh(scale)
+            
+            # 3. FiLM 调制公式：modulated = proprio * (1 + scale) + shift
+            #    - (1 + scale)：乘性调制，初期 scale≈0 时退化为恒等变换
+            #    - shift：加性调制，提供偏移能力
+            modulated_proprio = proprio_obs * (1.0 + scale) + shift
+        else:
+            # 如果禁用 FiLM，直接使用原始本体观测（向后兼容）
+            modulated_proprio = proprio_obs
+        
+        # 拼接调制后的本体特征和视觉特征
+        fused_obs = torch.cat([modulated_proprio, vision_latent], dim=-1)  # (B, num_fused_obs)
         
         return fused_obs
     
@@ -208,7 +279,14 @@ def build_vision_actor_critic(cfg, num_actions):
         actor_hidden_dims=cfg.policy.actor_hidden_dims,
         critic_hidden_dims=cfg.policy.critic_hidden_dims,
         activation=cfg.policy.activation,
-        init_noise_std=cfg.policy.init_noise_std if hasattr(cfg.policy, 'init_noise_std') else 1.0
+        init_noise_std=cfg.policy.init_noise_std if hasattr(cfg.policy, 'init_noise_std') else 1.0,
+        # 🎬 传递 FiLM 门控参数（从 cfg.policy 读取，提供默认值以保证向后兼容）
+        use_film_gating=getattr(cfg.policy, 'use_film_gating', True),
+        film_hidden_dims=getattr(cfg.policy, 'film_hidden_dims', [64]),
+        film_activation=getattr(cfg.policy, 'film_activation', 'elu'),
+        film_scale_init=getattr(cfg.policy, 'film_scale_init', 0.0),
+        film_shift_init=getattr(cfg.policy, 'film_shift_init', 0.0),
+        film_scale_limit=getattr(cfg.policy, 'film_scale_limit', 0.1),
     )
     
     return actor_critic

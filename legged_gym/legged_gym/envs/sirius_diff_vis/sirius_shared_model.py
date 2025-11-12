@@ -85,6 +85,18 @@ class SiriusSharedPPOCfg:
         # 视觉编码器配置（必须一致！）
         use_vision = True  # 标记使用视觉输入
         vision_latent_dim = 32  # 必须与 vision_encoder.latent_dim 一致
+        
+        # 🎬 FiLM/Gating 配置 - 使用视觉特征调制本体特征
+        # FiLM (Feature-wise Linear Modulation): modulated_proprio = proprio * (1 + scale) + shift
+        # 这种门控机制让视觉特征能够动态调制本体特征，增强多模态融合能力
+        use_film_gating = True  # 是否启用 FiLM 门控（默认启用）
+        film_hidden_dims = [64]  # 门控 MLP 隐藏层维度：vision_latent (32) -> [64] -> scale(45) + shift(45)
+        film_activation = 'elu'  # 门控 MLP 的激活函数
+        
+        # FiLM 参数初始化和限制（保证训练稳定性）
+        film_scale_init = 0.0   # scale 的初始值（0.0 表示初期接近恒等变换）
+        film_shift_init = 0.0   # shift 的初始值（0.0 表示初期无偏移）
+        film_scale_limit = 0.1  # scale 的限制范围（通过 tanh 限幅到 ±0.1，避免初期梯度爆炸）
     
     class algorithm(LeggedRobotCfgPPO.algorithm):
         """

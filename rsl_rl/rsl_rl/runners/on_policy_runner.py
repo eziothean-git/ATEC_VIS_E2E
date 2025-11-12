@@ -245,6 +245,10 @@ class OnPolicyRunner:
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
+        
+        # 🎬 Log FiLM gating statistics (if enabled)
+        if hasattr(self.alg.actor_critic, 'use_film') and self.alg.actor_critic.use_film:
+            self._log_film_statistics(locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
@@ -287,6 +291,95 @@ class OnPolicyRunner:
                        f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
+
+    def _log_film_statistics(self, iteration):
+        """
+        记录 FiLM 门控模块的统计信息到 TensorBoard
+        
+        监控内容：
+        - scale 和 shift 的均值、标准差、最小值、最大值
+        - 调制强度（相对于本体特征的变化幅度）
+        
+        这些信息有助于：
+        1. 验证 FiLM 是否在学习（scale/shift 从 0 开始增长）
+        2. 检查门控是否过强或过弱
+        3. 调试训练不稳定的问题
+        
+        Args:
+            iteration: 当前训练迭代次数
+        """
+        try:
+            import torch
+            
+            # 获取一个小批量数据用于统计
+            with torch.no_grad():
+                # 从存储中获取观测数据
+                if hasattr(self.alg.storage, 'observations') and hasattr(self.alg.storage, 'depth_observations'):
+                    # 使用最后一批数据（避免重新采样）
+                    batch_size = min(256, self.alg.storage.observations.shape[0])
+                    proprio_obs = self.alg.storage.observations[:batch_size, 0].to(self.device)
+                    depth_obs = self.alg.storage.depth_observations[:batch_size, 0].to(self.device)
+                    
+                    # 获取视觉特征
+                    vision_latent = self.alg.actor_critic.vision_encoder(depth_obs)
+                    
+                    # 通过 FiLM MLP 获取 scale 和 shift
+                    film_out = self.alg.actor_critic.film_mlp(vision_latent)
+                    scale_raw, shift_raw = torch.split(
+                        film_out, 
+                        self.alg.actor_critic.num_proprio_obs, 
+                        dim=-1
+                    )
+                    
+                    # 应用限幅（与实际使用时一致）
+                    scale = self.alg.actor_critic.film_scale_limit * torch.tanh(scale_raw)
+                    shift = shift_raw
+                    
+                    # 计算调制效果
+                    modulated = proprio_obs * (1.0 + scale) + shift
+                    modulation_magnitude = (modulated - proprio_obs).abs().mean()
+                    relative_change = modulation_magnitude / (proprio_obs.abs().mean() + 1e-8)
+                    
+                    # 记录 scale 统计
+                    self.writer.add_scalar('FiLM/scale_mean', scale.mean().item(), iteration)
+                    self.writer.add_scalar('FiLM/scale_std', scale.std().item(), iteration)
+                    self.writer.add_scalar('FiLM/scale_min', scale.min().item(), iteration)
+                    self.writer.add_scalar('FiLM/scale_max', scale.max().item(), iteration)
+                    self.writer.add_scalar('FiLM/scale_abs_mean', scale.abs().mean().item(), iteration)
+                    
+                    # 记录 shift 统计
+                    self.writer.add_scalar('FiLM/shift_mean', shift.mean().item(), iteration)
+                    self.writer.add_scalar('FiLM/shift_std', shift.std().item(), iteration)
+                    self.writer.add_scalar('FiLM/shift_min', shift.min().item(), iteration)
+                    self.writer.add_scalar('FiLM/shift_max', shift.max().item(), iteration)
+                    self.writer.add_scalar('FiLM/shift_abs_mean', shift.abs().mean().item(), iteration)
+                    
+                    # 记录调制效果
+                    self.writer.add_scalar('FiLM/modulation_magnitude', modulation_magnitude.item(), iteration)
+                    self.writer.add_scalar('FiLM/relative_change', relative_change.item(), iteration)
+                    
+                    # 记录原始输出（未限幅的 scale）的统计，用于监控是否遇到限幅
+                    scale_raw_tanh = torch.tanh(scale_raw)  # 限幅前的值（经过 tanh）
+                    self.writer.add_scalar('FiLM/scale_saturation', 
+                                         (scale_raw_tanh.abs() > 0.9).float().mean().item(), 
+                                         iteration)
+                    
+                    # 可选：每 50 个迭代打印一次 FiLM 统计（避免刷屏）
+                    if iteration % 50 == 0:
+                        print(f"\n[FiLM Stats @ iter {iteration}]")
+                        print(f"  scale: mean={scale.mean().item():.6f}, "
+                              f"std={scale.std().item():.6f}, "
+                              f"range=[{scale.min().item():.6f}, {scale.max().item():.6f}]")
+                        print(f"  shift: mean={shift.mean().item():.6f}, "
+                              f"std={shift.std().item():.6f}, "
+                              f"range=[{shift.min().item():.6f}, {shift.max().item():.6f}]")
+                        print(f"  modulation: magnitude={modulation_magnitude.item():.6f}, "
+                              f"relative={relative_change.item()*100:.2f}%")
+                
+        except Exception as e:
+            # 如果出错，静默失败（不影响训练）
+            print(f"[Warning] Failed to log FiLM statistics: {e}")
+            pass
 
     def save(self, path, infos=None):
         torch.save({
