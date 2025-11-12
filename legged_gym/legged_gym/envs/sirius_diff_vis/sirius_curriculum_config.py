@@ -255,7 +255,7 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
         num_steps_per_env = 24  # 每个env收集的步数
         
         # 保存和日志
-        save_interval = 50
+        save_interval = 25
         
         # 课程学习相关
         # resume = False  # 从头开始训练课程（推荐）
