@@ -147,7 +147,8 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
     class commands(SiriusFlatCfg.commands):
         # 🎯 课程学习：命令速度也从简单开始逐渐增加
         curriculum = True
-        max_curriculum = 0.6  # 最大线速度命令（m/s）- 从0.6开始而不是0.8
+        max_curriculum = 0.6  # 最大前进速度命令（m/s）
+        max_reverse_curriculum = 0.15  # 🔧 最大后退速度命令（m/s）- 限制后退速度以保证安全
         
         class ranges:
             lin_vel_x = [-0.1, 0.3]     # 🎯 初始前进速度范围较小（从0.5而非0.8开始）

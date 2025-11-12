@@ -470,15 +470,38 @@ class SiriusJoyFlat(BaseTask):
         """ 
         Randomly select commands of some environments
         
-        🔧 改进: 使用互斥模式避免同时高速行走和快速旋转
+        🔧 改进 1: 偏向前进采样（90% 前进，10% 后退）
+        🔧 改进 2: 使用互斥模式避免同时高速行走和快速旋转
         - 80% 直行模式: 主要线速度，角速度降低到30%（允许轻微转向）
         - 20% 转向模式: 主要角速度，线速度降低到30%（慢速转向/原地转）
 
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
-        # 随机采样所有命令
-        self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+        # 🆕 偏向前进的采样：90% 前进，10% 后退
+        direction_selector = torch.rand(len(env_ids), device=self.device)
+        forward_mask = direction_selector < 0.9  # 90% 前进
+        backward_mask = ~forward_mask  # 10% 后退
+        
+        # 前进命令：从 [0, max] 采样
+        if forward_mask.any():
+            self.commands[env_ids[forward_mask], 0] = torch_rand_float(
+                0., 
+                self.command_ranges["lin_vel_x"][1], 
+                (forward_mask.sum(), 1), 
+                device=self.device
+            ).squeeze(1)
+        
+        # 后退命令：从 [min, 0] 采样
+        if backward_mask.any():
+            self.commands[env_ids[backward_mask], 0] = torch_rand_float(
+                self.command_ranges["lin_vel_x"][0], 
+                0., 
+                (backward_mask.sum(), 1), 
+                device=self.device
+            ).squeeze(1)
+        
+        # 横向速度和角速度正常采样
         self.commands[env_ids, 1] = torch_rand_float(self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         if self.cfg.commands.heading_command:
             self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
@@ -685,16 +708,28 @@ class SiriusJoyFlat(BaseTask):
         
         # 🔍 调试输出：每个 episode 结束时打印课程状态
         if len(env_ids) > 0 and self.common_step_counter % self.max_episode_length == 0:
+            max_reverse = getattr(self.cfg.commands, 'max_reverse_curriculum', 0.15)
+            # 统计当前命令分布
+            forward_commands = (self.commands[:, 0] > 0).sum().item()
+            backward_commands = (self.commands[:, 0] < 0).sum().item()
+            total_commands = self.commands.shape[0]
+            fwd_ratio = forward_commands / total_commands if total_commands > 0 else 0
+            bwd_ratio = backward_commands / total_commands if total_commands > 0 else 0
+            
             print(f"🎯 Command Curriculum Check (step {self.common_step_counter}):")
             print(f"   Average tracking reward: {avg_reward:.4f}")
             print(f"   Threshold (0.7×scale):   {threshold:.4f}")
             print(f"   Current lin_vel_x range: [{self.command_ranges['lin_vel_x'][0]:.2f}, {self.command_ranges['lin_vel_x'][1]:.2f}] m/s")
-            print(f"   Max curriculum speed:    {self.cfg.commands.max_curriculum:.2f} m/s")
+            print(f"   Max forward speed:       {self.cfg.commands.max_curriculum:.2f} m/s")
+            print(f"   Max reverse speed:       {max_reverse:.2f} m/s")
+            print(f"   📊 Command sampling: {forward_commands}/{total_commands} forward ({fwd_ratio:.1%}), {backward_commands}/{total_commands} backward ({bwd_ratio:.1%})")
         
         # If the tracking reward is above 70% of the maximum, increase the range of commands
         if avg_reward > threshold:
             old_range = [self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1]]
-            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
+            # 🔧 修复：后退速度限制为 -0.15 m/s，前进速度可达 0.6 m/s（非对称）
+            max_reverse = getattr(self.cfg.commands, 'max_reverse_curriculum', 0.15)  # 默认 0.15 m/s
+            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -max_reverse, 0.)
             self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
             print(f"   ✅ CURRICULUM ADVANCED: lin_vel_x [{old_range[0]:.2f}, {old_range[1]:.2f}] → [{self.command_ranges['lin_vel_x'][0]:.2f}, {self.command_ranges['lin_vel_x'][1]:.2f}]")
 
