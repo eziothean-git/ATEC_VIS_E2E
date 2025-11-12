@@ -233,6 +233,9 @@ class SiriusJoyFlat(BaseTask):
         Note: 本体感觉观测存储在 self.obs_buf 中（45维），
               深度图像存储在 self.depth_obs_buf 中（B, 1, H, W）。
               PPO算法会使用这两个buffer来构建完整的观测（45+32=77维）。
+              
+              ⚠️ 重要：高度测量 (measure_heights) 仅用于奖励计算，不输入模型！
+              这样确保训练和部署时模型输入维度一致（部署时无法获取地形高度）。
         """
         # 本体感觉观测 (proprioception): 45维
         self.obs_buf = torch.cat((  self.base_ang_vel  * self.obs_scales.ang_vel, # 3dim
@@ -243,10 +246,12 @@ class SiriusJoyFlat(BaseTask):
                                     self.actions # 12dim
                                     ),dim=-1)
         
-        # add perceptive inputs if not blind
+        # 地形高度测量：仅用于奖励计算，不输入模型（保证部署一致性）
         if self.cfg.terrain.measure_heights:
-            heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements
-            self.obs_buf = torch.cat((self.obs_buf, heights), dim=-1)
+            # 更新内部状态，用于 _reward_base_height() 等奖励函数
+            # 注意：不添加到 obs_buf！
+            pass
+        
         # add noise if needed
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
@@ -1034,8 +1039,7 @@ class SiriusJoyFlat(BaseTask):
         noise_vec[9:21] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
         noise_vec[21:33] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         noise_vec[33:45] = 0. # previous actions
-        if self.cfg.terrain.measure_heights:
-            noise_vec[48:235] = noise_scales.height_measurements* noise_level * self.obs_scales.height_measurements
+        # 注意：高度测量不再输入模型，因此不需要噪声
         return noise_vec
 
     #----------------------------------------
@@ -1525,8 +1529,13 @@ class SiriusJoyFlat(BaseTask):
 
     def _reward_base_height(self):
         # Penalize base height away from target
-        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
-        return torch.square(base_height - self.cfg.rewards.base_height_target)
+        # 计算机器人相对于当前地形的高度（脚下地形的平均高度）
+        terrain_height = torch.mean(self.measured_heights, dim=1)  # [num_envs]
+        base_height_above_terrain = self.root_states[:, 2] - terrain_height  # [num_envs]
+        
+        # 目标是保持在地形上方 base_height_target 的高度
+        # 这样在平地、dimps、斜坡等各种地形都能自适应
+        return torch.square(base_height_above_terrain - self.cfg.rewards.base_height_target)
     
     def _reward_torques(self):
         # Penalize torques

@@ -67,7 +67,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
     """
     
     class env(SiriusFlatCfg.env):
-        num_observations = 45
+        num_observations = 45  # 本体观测（不包含高度测量，保证部署一致性）
         episode_length_s = 20.0  # 🎯 缩短episode，加快curriculum迭代和学习循环
         num_envs = 1024  # 建议用较多envs覆盖更多地形
 
@@ -78,8 +78,8 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         curriculum = True
         selected = False
         
-        # 是否测量高度（可选，增加观测维度）
-        measure_heights = False  # 先关闭，专注视觉
+        # 是否测量高度（必须启用！高度奖励依赖此功能）
+        measure_heights = True  # 启用地形高度测量（课程学习必需！）
         
         # 地形网格布局
         terrain_length = 8.0  # 每个子地形的长度（米）
@@ -88,7 +88,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         num_cols = 8          # 地形类型数量（8种地形）- 修正：make_terrain实际只有8种
         
         # 🎯 课程学习关键：从最低难度开始！
-        max_init_terrain_level = 1  # 最大初始难度级别（索引0-1，对应难度0.0-0.1）
+        max_init_terrain_level = 2  # 最大初始难度级别（索引0-1，对应难度0.0-0.1）
                                      # 机器人将从简单地形开始，逐步晋级
         
         # 🎨 视觉多样性增强：在简单课程的同时，保留少量环境在复杂地形做"视觉探索"
@@ -123,7 +123,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             
             # 稳定性奖励（对复杂地形很重要）
             orientation = -0.75          # 惩罚倾斜
-            base_height = -0.0          # 保持高度（可选）
+            base_height = -0.1          # 保持高度（可选）
             
             # 平滑性奖励
             lin_vel_z = -0.075            # 惩罚垂直速度
@@ -141,7 +141,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
 
             orientation = -1.5       # 强姿态惩罚（与 flat 一致）
             feet_air_time = 2      # 腾空奖励（与 flat 一致）
-            base_height = -1.0     # 强高度惩罚（与 flat 一致）
+            base_height = -2.5     # 强高度惩罚（与 flat 一致）
             posture = 1.0            # 姿态奖励（与 flat 一致）
     
     class commands(SiriusFlatCfg.commands):
