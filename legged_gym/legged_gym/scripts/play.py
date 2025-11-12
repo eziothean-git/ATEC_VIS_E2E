@@ -52,10 +52,24 @@ def play(args):
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
+    
+    # 🎯 Set command ranges to ensure robot moves in play mode
+    # Match the curriculum config ranges but use trained policy's expected ranges
+    if hasattr(env_cfg.commands, 'ranges'):
+        # Use moderate forward velocity for visualization
+        env_cfg.commands.ranges.lin_vel_x = [-0.3, 0.6]  # Allow backward and forward movement
+        env_cfg.commands.ranges.lin_vel_y = [-0.3, 0.3]  # Allow lateral movement
+        env_cfg.commands.ranges.ang_vel_yaw = [-0.8, 0.8]  # Allow turning
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     obs = env.get_observations()
+    
+    # 🎯 Set a non-zero command to make the robot move
+    # This ensures the robot has a velocity target to track
+    env.commands[:, 0] = 0.5  # Forward velocity command (m/s)
+    env.commands[:, 1] = 0.0  # Lateral velocity command (m/s)
+    env.commands[:, 2] = 0.0  # Yaw rate command (rad/s)
     # load policy
     train_cfg.runner.resume = True
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
@@ -77,8 +91,27 @@ def play(args):
     camera_direction = np.array(env_cfg.viewer.lookat) - np.array(env_cfg.viewer.pos)
     img_idx = 0
 
+    # Check if using vision policy
+    from rsl_rl.modules.vision_actor_critic import VisionProprioceptionActorCritic
+    is_vision_policy = isinstance(ppo_runner.alg.actor_critic, VisionProprioceptionActorCritic)
+    use_depth = is_vision_policy and hasattr(env, 'depth_obs_buf')
+    
+    if use_depth:
+        print(f"[Play] Using vision policy with depth observations: {env.depth_obs_buf.shape}")
+    else:
+        print(f"[Play] Using standard policy without depth observations")
+    
+    print(f"[Play] Robot velocity commands set to: forward={env.commands[0, 0].item():.2f} m/s, "
+          f"lateral={env.commands[0, 1].item():.2f} m/s, yaw={env.commands[0, 2].item():.2f} rad/s")
+
     for i in range(10*int(env.max_episode_length)):
-        actions = policy(obs.detach())
+        # Get actions from policy
+        if use_depth:
+            # Vision policy: pass proprioception + depth separately
+            actions = policy(obs.detach(), env.depth_obs_buf.detach())
+        else:
+            # Standard policy: pass only observations
+            actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
         if RECORD_FRAMES:
             if i % 2:

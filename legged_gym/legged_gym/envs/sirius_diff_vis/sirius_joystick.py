@@ -728,9 +728,11 @@ class SiriusJoyFlat(BaseTask):
         if avg_reward > threshold:
             old_range = [self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1]]
             # 🔧 修复：后退速度限制为 -0.15 m/s，前进速度可达 0.6 m/s（非对称）
+            # 🆕 渐进式增长：小步长 0.1 m/s（而非 0.5），实现平滑过渡
             max_reverse = getattr(self.cfg.commands, 'max_reverse_curriculum', 0.15)  # 默认 0.15 m/s
-            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -max_reverse, 0.)
-            self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+            step_size = 0.1  # 渐进步长（从 0.5 改为 0.1）
+            self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - step_size, -max_reverse, 0.)
+            self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + step_size, 0., self.cfg.commands.max_curriculum)
             print(f"   ✅ CURRICULUM ADVANCED: lin_vel_x [{old_range[0]:.2f}, {old_range[1]:.2f}] → [{self.command_ranges['lin_vel_x'][0]:.2f}, {self.command_ranges['lin_vel_x'][1]:.2f}]")
 
     # ---------- camera helpers ----------
