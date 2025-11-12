@@ -133,8 +133,8 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             
             # 步态奖励
             feet_air_time = 1.0         # 奖励腾空时间
-            stumble = -2.5              # 惩罚绊倒（对崎岖地形重要）
-            stand_still = -0.25          # 惩罚原地不动
+            stumble = -1.5              # 惩罚绊倒（对崎岖地形重要）
+            stand_still = -2.5          # 惩罚原地不动
             
             # 终止惩罚
             termination = -5.0
@@ -149,6 +149,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         curriculum = True
         max_curriculum = 0.8  # 最大前进速度命令（m/s）
         max_reverse_curriculum = 0.1  # 🔧 最大后退速度命令（m/s）- 限制后退速度以保证安全
+        min_forward_speed = 0.15  # 🔧 最小前进速度（m/s）- 避免采样到过小的速度导致机器人几乎不动
         
         class ranges:
             lin_vel_x = [-0.1, 0.3]     # 🎯 初始前进速度范围较小（从0.5而非0.8开始）

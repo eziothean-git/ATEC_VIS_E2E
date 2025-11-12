@@ -474,6 +474,7 @@ class SiriusJoyFlat(BaseTask):
         🔧 改进 2: 使用互斥模式避免同时高速行走和快速旋转
         - 80% 直行模式: 主要线速度，角速度降低到30%（允许轻微转向）
         - 20% 转向模式: 主要角速度，线速度降低到30%（慢速转向/原地转）
+        🔧 改进 3: 前进速度最小值为 0.15 m/s，避免采样到过小的速度
 
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
@@ -483,11 +484,13 @@ class SiriusJoyFlat(BaseTask):
         forward_mask = direction_selector < 0.9  # 90% 前进
         backward_mask = ~forward_mask  # 10% 后退
         
-        # 前进命令：从 [0, max] 采样
+        # 前进命令：从 [min_forward_speed, max] 采样，确保至少 0.15 m/s
         if forward_mask.any():
+            min_forward_speed = getattr(self.cfg.commands, 'min_forward_speed', 0.15)  # 最小前进速度 (m/s)
+            max_forward_speed = self.command_ranges["lin_vel_x"][1]
             self.commands[env_ids[forward_mask], 0] = torch_rand_float(
-                0., 
-                self.command_ranges["lin_vel_x"][1], 
+                min_forward_speed, 
+                max_forward_speed, 
                 (forward_mask.sum(), 1), 
                 device=self.device
             ).squeeze(1)

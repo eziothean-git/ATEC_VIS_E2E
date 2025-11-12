@@ -83,6 +83,7 @@ class SiriusFlatCfg( LeggedRobotCfg ):
     class commands( LeggedRobotCfg.commands ):
         heading_command = False
         resampling_time = 4.
+        min_forward_speed = 0.15  # 🔧 最小前进速度（m/s）- 避免采样到过小的速度导致机器人几乎不动
         class ranges( LeggedRobotCfg.commands.ranges ):
             ang_vel_yaw = [-1.5, 1.5]
 
