@@ -88,8 +88,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         num_cols = 8          # 地形类型数量（8种地形）- 修正：make_terrain实际只有8种
         
         # 🎯 课程学习关键：从最低难度开始！
-        max_init_terrain_level = 1  # 最大初始难度级别（索引0-2，对应难度0.0-0.2）
+        max_init_terrain_level = 1  # 最大初始难度级别（索引0-1，对应难度0.0-0.1）
                                      # 机器人将从简单地形开始，逐步晋级
+        
+        # 🎨 视觉多样性增强：在简单课程的同时，保留少量环境在复杂地形做"视觉探索"
+        # 这样视觉编码器从一开始就能见到各种场景，避免过拟合到平地
+        visual_exploration_ratio = 0.15  # 15% 的环境用于视觉探索（在所有难度随机分布）
         
         # 地形分辨率
         horizontal_scale = 0.1  # 0.1m per pixel

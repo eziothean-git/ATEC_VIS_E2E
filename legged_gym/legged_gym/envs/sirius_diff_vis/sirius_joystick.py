@@ -1299,7 +1299,47 @@ class SiriusJoyFlat(BaseTask):
             # put robots at the origins defined by the terrain
             max_init_level = self.cfg.terrain.max_init_terrain_level
             if not self.cfg.terrain.curriculum: max_init_level = self.cfg.terrain.num_rows - 1
+            
+            # 🐛 调试输出：打印课程学习配置
+            print(f"\n{'='*60}")
+            print(f"[Terrain Initialization] 地形课程学习配置")
+            print(f"{'='*60}")
+            print(f"  curriculum 启用: {self.cfg.terrain.curriculum}")
+            print(f"  max_init_terrain_level (配置): {self.cfg.terrain.max_init_terrain_level}")
+            print(f"  max_init_level (实际使用): {max_init_level}")
+            print(f"  num_rows (总难度数): {self.cfg.terrain.num_rows}")
+            print(f"  num_cols (地形类型): {self.cfg.terrain.num_cols}")
+            print(f"  num_envs (环境数): {self.num_envs}")
+            
+            # 🎨 混合策略：大部分环境课程学习 + 少量环境视觉探索
+            visual_exploration_ratio = getattr(self.cfg.terrain, 'visual_exploration_ratio', 0.0)
+            num_curriculum_envs = int(self.num_envs * (1 - visual_exploration_ratio))
+            num_exploration_envs = self.num_envs - num_curriculum_envs
+            
+            # 课程学习环境：在 [0, max_init_level] 范围内随机
             self.terrain_levels = torch.randint(0, max_init_level+1, (self.num_envs,), device=self.device)
+            
+            # 视觉探索环境：在所有难度随机分布（提供视觉多样性）
+            if num_exploration_envs > 0:
+                exploration_ids = torch.randperm(self.num_envs, device=self.device)[:num_exploration_envs]
+                self.terrain_levels[exploration_ids] = torch.randint(
+                    0, self.cfg.terrain.num_rows, 
+                    (num_exploration_envs,), 
+                    device=self.device
+                )
+                print(f"  visual_exploration_ratio: {visual_exploration_ratio:.1%}")
+                print(f"  课程学习环境: {num_curriculum_envs} ({num_curriculum_envs/self.num_envs:.1%})")
+                print(f"  视觉探索环境: {num_exploration_envs} ({num_exploration_envs/self.num_envs:.1%})")
+            
+            # 🐛 打印初始地形难度分布
+            print(f"\n初始地形难度分布:")
+            for level in range(self.cfg.terrain.num_rows):
+                count = (self.terrain_levels == level).sum().item()
+                percentage = count / self.num_envs * 100
+                marker = "📚" if level <= max_init_level else "🎨"  # 课程学习 vs 视觉探索
+                print(f"  {marker} 难度 {level}: {count:4d} 个环境 ({percentage:5.2f}%)")
+            print(f"{'='*60}\n")
+            
             self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device), (self.num_envs/self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
             self.max_terrain_level = self.cfg.terrain.num_rows
             self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
