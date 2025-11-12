@@ -68,7 +68,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
     
     class env(SiriusFlatCfg.env):
         num_observations = 45  # 本体观测（不包含高度测量，保证部署一致性）
-        episode_length_s = 20.0  # 🎯 缩短episode，加快curriculum迭代和学习循环
+        episode_length_s = 48.0  # 🎯 缩短episode，加快curriculum迭代和学习循环
         num_envs = 1024  # 建议用较多envs覆盖更多地形
 
     class terrain(SiriusFlatCfg.terrain):
@@ -118,8 +118,8 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         # 课程学习模式下的奖励调整
         class scales:
             # 基础运动奖励
-            tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
+            tracking_lin_vel = 5.0
+            tracking_ang_vel = 2.5
             
             # 稳定性奖励（对复杂地形很重要）
             orientation = -0.75          # 惩罚倾斜
@@ -140,15 +140,15 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             termination = -5.0
 
             orientation = -1.5       # 强姿态惩罚（与 flat 一致）
-            feet_air_time = 2      # 腾空奖励（与 flat 一致）
-            base_height = -2.5     # 强高度惩罚（与 flat 一致）
+            feet_air_time = 0.5      # 腾空奖励（与 flat 一致）
+            base_height = -0.5     # 强高度惩罚（与 flat 一致）
             posture = 1.0            # 姿态奖励（与 flat 一致）
     
     class commands(SiriusFlatCfg.commands):
         # 🎯 课程学习：命令速度也从简单开始逐渐增加
         curriculum = True
-        max_curriculum = 0.6  # 最大前进速度命令（m/s）
-        max_reverse_curriculum = 0.15  # 🔧 最大后退速度命令（m/s）- 限制后退速度以保证安全
+        max_curriculum = 0.8  # 最大前进速度命令（m/s）
+        max_reverse_curriculum = 0.1  # 🔧 最大后退速度命令（m/s）- 限制后退速度以保证安全
         
         class ranges:
             lin_vel_x = [-0.1, 0.3]     # 🎯 初始前进速度范围较小（从0.5而非0.8开始）
@@ -226,7 +226,7 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
     # 算法配置
     class algorithm(SiriusSharedPPOCfg.algorithm):
         # 🎯 课程学习需要更多探索，尤其是在早期简单地形阶段
-        entropy_coef = 0.025  # 提高熵系数，鼓励探索新策略
+        entropy_coef = 0.05  # 提高熵系数，鼓励探索新策略
         
         # PPO 超参数
         value_loss_coef = 1.0
