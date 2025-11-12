@@ -585,34 +585,6 @@ class SiriusJoyFlat(BaseTask):
         )
 
         # ------------------- env / actor 索引 -------------------
-        # 假定每个 env 只有 1 个 robot actor：
-        #   robot_actor_id = env_id * actors_per_env
-        env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        actor_ids_long = (env_ids * int(self.actors_per_env)).long()
-        actor_ids_int32 = actor_ids_long.to(torch.int32)
-
-        # ------------------- 更新本地 actor buffer -------------------
-        # root_states 是 _actor_root_states 的 view，右侧必须 clone() 打断别名
-        # 这里整个 clone 一份，形状是 (num_envs, 13)，和左边选出的行一一对应。
-        self._actor_root_states[actor_ids_long] = self.root_states.clone()
-
-        # ------------------- 同步到仿真 -------------------
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim,
-            gymtorch.unwrap_tensor(self._actor_root_states),
-            gymtorch.unwrap_tensor(actor_ids_int32),
-            len(actor_ids_int32),
-        )
-
-        """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
-        max_vel = self.cfg.domain_rand.max_push_vel_xy
-
-        # 给所有 env 的 base x/y 线速度一个随机冲量
-        self.root_states[:, 7:9] = torch_rand_float(
-            -max_vel, max_vel, (self.num_envs, 2), device=self.device
-        )
-
-        # ------------------- env / actor 索引 -------------------
         # 假设每个 env 只有 1 个 robot actor：
         #   robot_actor_id = env_id * actors_per_env
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
