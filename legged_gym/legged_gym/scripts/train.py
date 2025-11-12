@@ -335,7 +335,17 @@ def train(args):
             stop_event.wait(sleep_interval)
 
     cam_thread = None
+    # Start camera monitor if:
+    # 1. CLI flag --camera_enable is set, OR
+    # 2. config has camera.debug_outputs = True AND not in headless mode
+    should_monitor_camera = False
     if hasattr(args, 'camera_enable') and args.camera_enable:
+        should_monitor_camera = True
+    elif not args.headless and getattr(env_cfg, 'camera', None) is not None and getattr(env_cfg.camera, 'debug_outputs', False):
+        should_monitor_camera = True
+        print('[train] camera.debug_outputs=True detected (non-headless mode), starting camera monitor thread')
+    
+    if should_monitor_camera:
         cam_thread = threading.Thread(target=camera_monitor, daemon=True)
         cam_thread.start()
         # If camera_test_mode is active, wait for the camera monitor to finish capturing

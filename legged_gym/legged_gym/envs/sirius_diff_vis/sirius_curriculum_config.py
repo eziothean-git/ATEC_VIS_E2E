@@ -37,7 +37,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
     
     class env(SiriusFlatCfg.env):
         num_observations = 45
-        episode_length_s = 20.0  # 稍短一些，加快curriculum迭代
+        episode_length_s = 100.0  # 稍短一些，加快curriculum迭代
         num_envs = 1024  # 建议用较多envs覆盖更多地形
 
     class terrain(SiriusFlatCfg.terrain):
@@ -88,7 +88,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             base_height = -0.0          # 保持高度（可选）
             
             # 平滑性奖励
-            lin_vel_z = -2.0            # 惩罚垂直速度
+            lin_vel_z = -0.5            # 惩罚垂直速度
             ang_vel_xy = -0.05          # 惩罚横滚/俯仰角速度
             dof_acc = -2.5e-7           # 惩罚关节加速度
             collision = -1.0            # 惩罚碰撞
@@ -100,25 +100,30 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             
             # 步态奖励
             feet_air_time = 1.0         # 奖励腾空时间
-            stumble = -0.0              # 惩罚绊倒（对崎岖地形重要）
-            stand_still = -0.0          # 惩罚原地不动
+            stumble = -2.0              # 惩罚绊倒（对崎岖地形重要）
+            stand_still = -0.25          # 惩罚原地不动
             
             # 终止惩罚
             termination = -0.0
+
+            orientation = -5.0       # 强姿态惩罚（与 flat 一致）
+            feet_air_time = 3.0      # 腾空奖励（与 flat 一致）
+            base_height = -200.0     # 强高度惩罚（与 flat 一致）
+            posture = 1.0            # 姿态奖励（与 flat 一致）
     
     class commands(SiriusFlatCfg.commands):
         # 课程学习：命令速度范围也会逐渐增加
         curriculum = True
-        max_curriculum = 1.5  # 最大线速度命令（m/s）
+        max_curriculum = 0.8  # 最大线速度命令（m/s）
         
         class ranges:
-            lin_vel_x = [-1.0, 1.5]    # 前进速度范围
-            lin_vel_y = [-0.5, 0.5]    # 横向速度范围
+            lin_vel_x = [-0.15, 0.8]    # 前进速度范围
+            lin_vel_y = [-0.2, 0.2]    # 横向速度范围
             ang_vel_yaw = [-1.0, 1.0]  # 转向速度范围
             heading = [-3.14, 3.14]
 
     class camera(SiriusFlatCfg.camera):
-        """相机配置 - 与 sirius 保持一致"""
+        """相机配置 - 与 sirius 保持一致 + 启用调试输出"""
         enable = True
         width = 87
         height = 58
@@ -128,6 +133,10 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         far_plane = 10.0
         enable_tensors = True  # GPU 优化
         use_collision_geometry = False
+        
+        # 🔍 启用调试输出：定期保存深度图到磁盘
+        debug_outputs = False
+        display_interval_steps = 50  # 每50个仿真步保存一次（避免IO过载）
 
 
 class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):

@@ -901,6 +901,10 @@ class LeggedRobot(BaseTask):
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
 
+        # ⚠️ 关键修复：在渲染相机前刷新刚体状态，确保相机位置同步到最新的 trunk 位置
+        # 这解决了相机画面滞后于实际机器人位置的问题
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        
         # ensure graphics are stepped and sensors rendered
         self.gym.step_graphics(self.sim)
         self.gym.render_all_camera_sensors(self.sim)
@@ -1065,6 +1069,9 @@ class LeggedRobot(BaseTask):
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
 
+        # ⚠️ 同样需要刷新刚体状态（用于 OpenCV 可视化显示）
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        
         self.gym.step_graphics(self.sim)
         self.gym.render_all_camera_sensors(self.sim)
         imgs = []
