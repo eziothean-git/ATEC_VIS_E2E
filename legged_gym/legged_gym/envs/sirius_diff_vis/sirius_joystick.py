@@ -467,17 +467,35 @@ class SiriusJoyFlat(BaseTask):
 
 
     def _resample_commands(self, env_ids):
-        """ Randommly select commands of some environments
+        """ 
+        Randomly select commands of some environments
+        
+        🔧 改进: 使用互斥模式避免同时高速行走和快速旋转
+        - 80% 直行模式: 主要线速度，角速度降低到30%（允许轻微转向）
+        - 20% 转向模式: 主要角速度，线速度降低到30%（慢速转向/原地转）
 
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
+        # 随机采样所有命令
         self.commands[env_ids, 0] = torch_rand_float(self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         self.commands[env_ids, 1] = torch_rand_float(self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         if self.cfg.commands.heading_command:
             self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
         else:
             self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+
+        # 🆕 互斥模式: 避免同时高速 + 高旋转
+        mode_selector = torch.rand(len(env_ids), device=self.device)
+        
+        # 80% 直行模式: 角速度降低到30%（允许轻微转向调整）
+        straight_mode = mode_selector < 0.8
+        self.commands[env_ids[straight_mode], 2] *= 0.3
+        
+        # 20% 转向模式: 线速度降低到30%（慢速转向或原地转）
+        turning_mode = ~straight_mode
+        self.commands[env_ids[turning_mode], 0] *= 0.3
+        self.commands[env_ids[turning_mode], 1] *= 0.3
 
         # set small commands to zero
         self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > 0.2).unsqueeze(1)
@@ -619,15 +637,40 @@ class SiriusJoyFlat(BaseTask):
             # don't change on initial reset
             return
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
-        # robots that walked far enough progress to harder terains
-        move_up = distance > self.terrain.env_length / 2
-        # robots that walked less than half of their required distance go to simpler terrains
-        move_down = (distance < torch.norm(self.commands[env_ids, :2], dim=1)*self.max_episode_length_s*0.5) * ~move_up
+        
+        # robots that walked far enough progress to harder terrains
+        move_up = distance > self.terrain.env_length / 2  # > 4.0 meters
+        
+        # 🔧 修复: 使用固定降级阈值而非动态阈值，避免与升级阈值冲突
+        # 原来: distance < command_norm × max_episode_length_s × 0.5 (动态，会随命令速度增加而增加)
+        # 修改: distance < env_length / 4 (固定 2.0 米)
+        # 现在: 升级 > 4m，降级 < 2m，安全区 2-4m
+        move_down = (distance < self.terrain.env_length / 4) * ~move_up
+        
+        # 更新地形难度
+        old_levels = self.terrain_levels[env_ids].clone()
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        
         # Robots that solve the last level are sent to a random one
         self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
                                                    torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
                                                    torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
+        
+        # 🔍 调试输出：监控地形课程变化
+        if len(env_ids) > 0 and self.common_step_counter % self.max_episode_length == 0:
+            n_up = move_up.sum().item()
+            n_down = move_down.sum().item()
+            n_stay = len(env_ids) - n_up - n_down
+            avg_distance = distance.mean().item()
+            avg_level = self.terrain_levels.float().mean().item()
+            
+            print(f"🏔️ Terrain Curriculum Update (step {self.common_step_counter}):")
+            print(f"   Upgraded:   {n_up:3d}/{len(env_ids)} envs (distance > 4.0m)")
+            print(f"   Downgraded: {n_down:3d}/{len(env_ids)} envs (distance < 2.0m)")
+            print(f"   Stayed:     {n_stay:3d}/{len(env_ids)} envs (2.0m ≤ distance ≤ 4.0m)")
+            print(f"   Avg distance traveled: {avg_distance:.2f} m")
+            print(f"   Avg terrain level:     {avg_level:.2f}")
+        
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
     
     def update_command_curriculum(self, env_ids):
@@ -636,10 +679,24 @@ class SiriusJoyFlat(BaseTask):
         Args:
             env_ids (List[int]): ids of environments being reset
         """
-        # If the tracking reward is above 80% of the maximum, increase the range of commands
-        if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
+        # Calculate average tracking reward
+        avg_reward = torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length
+        threshold = 0.7 * self.reward_scales["tracking_lin_vel"]  # 🔧 降低阈值从 0.8 到 0.7
+        
+        # 🔍 调试输出：每个 episode 结束时打印课程状态
+        if len(env_ids) > 0 and self.common_step_counter % self.max_episode_length == 0:
+            print(f"🎯 Command Curriculum Check (step {self.common_step_counter}):")
+            print(f"   Average tracking reward: {avg_reward:.4f}")
+            print(f"   Threshold (0.7×scale):   {threshold:.4f}")
+            print(f"   Current lin_vel_x range: [{self.command_ranges['lin_vel_x'][0]:.2f}, {self.command_ranges['lin_vel_x'][1]:.2f}] m/s")
+            print(f"   Max curriculum speed:    {self.cfg.commands.max_curriculum:.2f} m/s")
+        
+        # If the tracking reward is above 70% of the maximum, increase the range of commands
+        if avg_reward > threshold:
+            old_range = [self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1]]
             self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
             self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+            print(f"   ✅ CURRICULUM ADVANCED: lin_vel_x [{old_range[0]:.2f}, {old_range[1]:.2f}] → [{self.command_ranges['lin_vel_x'][0]:.2f}, {self.command_ranges['lin_vel_x'][1]:.2f}]")
 
     # ---------- camera helpers ----------
     def _quat_from_euler(self, roll: float, pitch: float, yaw: float) -> gymapi.Quat:

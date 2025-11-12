@@ -249,6 +249,35 @@ class OnPolicyRunner:
         # 🎬 Log FiLM gating statistics (if enabled)
         if hasattr(self.alg.actor_critic, 'use_film') and self.alg.actor_critic.use_film:
             self._log_film_statistics(locs['it'])
+        
+        # 🎯 Log command curriculum statistics
+        if hasattr(self.env, 'command_ranges') and hasattr(self.env.cfg.commands, 'curriculum') and self.env.cfg.commands.curriculum:
+            self.writer.add_scalar('Command/max_lin_vel', self.env.command_ranges["lin_vel_x"][1], locs['it'])
+            self.writer.add_scalar('Command/min_lin_vel', self.env.command_ranges["lin_vel_x"][0], locs['it'])
+            # 计算当前平均 tracking reward（如果有 episode 信息）
+            if 'ep_infos' in locs and len(locs['ep_infos']) > 0:
+                tracking_rewards = []
+                for ep_info in locs['ep_infos']:
+                    if 'tracking_lin_vel' in ep_info:
+                        tracking_rewards.append(ep_info['tracking_lin_vel'])
+                if len(tracking_rewards) > 0:
+                    avg_tracking = torch.tensor(tracking_rewards).mean().item()
+                    self.writer.add_scalar('Command/avg_tracking_reward', avg_tracking, locs['it'])
+        
+        # 🏔️ Log terrain curriculum statistics
+        if hasattr(self.env, 'terrain_levels') and hasattr(self.env.cfg.terrain, 'curriculum') and self.env.cfg.terrain.curriculum:
+            avg_terrain_level = self.env.terrain_levels.float().mean().item()
+            max_terrain_level = self.env.terrain_levels.max().item()
+            min_terrain_level = self.env.terrain_levels.min().item()
+            self.writer.add_scalar('Terrain/avg_level', avg_terrain_level, locs['it'])
+            self.writer.add_scalar('Terrain/max_level', max_terrain_level, locs['it'])
+            self.writer.add_scalar('Terrain/min_level', min_terrain_level, locs['it'])
+            
+            # 统计各难度的环境数量
+            for level in range(self.env.max_terrain_level):
+                count = (self.env.terrain_levels == level).sum().item()
+                self.writer.add_scalar(f'Terrain/level_{level}_count', count, locs['it'])
+        
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
@@ -309,8 +338,6 @@ class OnPolicyRunner:
             iteration: 当前训练迭代次数
         """
         try:
-            import torch
-            
             # 获取一个小批量数据用于统计
             with torch.no_grad():
                 # 从存储中获取观测数据

@@ -152,7 +152,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         class ranges:
             lin_vel_x = [-0.1, 0.3]     # 🎯 初始前进速度范围较小（从0.5而非0.8开始）
             lin_vel_y = [-0.1, 0.1]   # 🎯 初始横向速度范围较小
-            ang_vel_yaw = [-0.8, 0.8]   # 🎯 初始转向速度范围较小
+            ang_vel_yaw = [-0.6, 0.6]   # 🔧 降低转向速度（从 ±0.8 改为 ±0.6，约 ±34°/s）
             heading = [-3.14, 3.14]
 
     class camera(SiriusFlatCfg.camera):
