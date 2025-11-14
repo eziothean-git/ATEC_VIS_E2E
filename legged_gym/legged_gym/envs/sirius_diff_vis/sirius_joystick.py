@@ -82,6 +82,11 @@ class SiriusJoyFlat(BaseTask):
         self.camera_props = None
         # flag to avoid repeated warnings when target body is missing
         self._camera_warned_missing_body = False
+        
+        # 🚀 相机更新频率控制
+        self._camera_update_counter = 0
+        self._camera_update_interval = getattr(getattr(cfg, 'camera', None), 'update_interval', 1)
+        
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
 
         if not self.headless:
@@ -425,29 +430,43 @@ class SiriusJoyFlat(BaseTask):
         self._obs_timings['noise'].append(t_noise)
         
         # 4. 获取深度图像观测 (vision): (num_envs, H, W) → (num_envs, 1, H, W)
+        # 🚀 性能优化：根据 update_interval 控制相机更新频率
         t_camera_start = time.perf_counter()
+        
+        # 检查是否需要更新相机
+        should_update_camera = (self._camera_update_counter % self._camera_update_interval == 0)
+        self._camera_update_counter += 1
+        
         if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized:
             try:
-                # 4a. 获取深度图
-                t0 = time.perf_counter()
-                depth_images = self.get_camera_depth_images(as_torch=True, return_mask=False)
-                t_camera_get = time.perf_counter() - t0
-                self._obs_timings['camera_get'].append(t_camera_get)
-                
-                # Debug: Log camera configuration on first call
-                if not hasattr(self, '_camera_obs_logged'):
-                    enable_tensors = getattr(self.cfg.camera, 'enable_tensors', False)
-                    print(f"[Compute Obs] Camera enable_tensors={enable_tensors}")
-                    print(f"[Compute Obs] Depth device={depth_images.device}, shape={depth_images.shape}, dtype={depth_images.dtype}")
-                    self._camera_obs_logged = True
-                
-                # 4b. 归一化到 [0, 1] 并添加通道维度
-                t0 = time.perf_counter()
-                max_depth = float(getattr(self.cfg.camera, 'max_depth', 5.0))
-                depth_normalized = depth_images / max_depth
-                self.depth_obs_buf = depth_normalized.unsqueeze(1)
-                t_camera_normalize = time.perf_counter() - t0
-                self._obs_timings['camera_normalize'].append(t_camera_normalize)
+                # 只在需要时更新相机（按 update_interval 间隔）
+                if should_update_camera:
+                    # 4a. 获取深度图
+                    t0 = time.perf_counter()
+                    depth_images = self.get_camera_depth_images(as_torch=True, return_mask=False)
+                    t_camera_get = time.perf_counter() - t0
+                    self._obs_timings['camera_get'].append(t_camera_get)
+                    
+                    # Debug: Log camera configuration on first call
+                    if not hasattr(self, '_camera_obs_logged'):
+                        enable_tensors = getattr(self.cfg.camera, 'enable_tensors', False)
+                        update_interval = self._camera_update_interval
+                        print(f"[Compute Obs] Camera enable_tensors={enable_tensors}")
+                        print(f"[Compute Obs] Camera update_interval={update_interval} (update every {update_interval} step{'s' if update_interval > 1 else ''})")
+                        print(f"[Compute Obs] Depth device={depth_images.device}, shape={depth_images.shape}, dtype={depth_images.dtype}")
+                        self._camera_obs_logged = True
+                    
+                    # 4b. 归一化到 [0, 1] 并添加通道维度
+                    t0 = time.perf_counter()
+                    max_depth = float(getattr(self.cfg.camera, 'max_depth', 5.0))
+                    depth_normalized = depth_images / max_depth
+                    self.depth_obs_buf = depth_normalized.unsqueeze(1)
+                    t_camera_normalize = time.perf_counter() - t0
+                    self._obs_timings['camera_normalize'].append(t_camera_normalize)
+                else:
+                    # 不更新时：复用上一次的相机观测（保持不变）
+                    # depth_obs_buf 保持上一次的值，无需操作
+                    pass
                 
             except Exception as e:
                 # 如果相机未初始化或出错，使用零填充
@@ -495,6 +514,10 @@ class SiriusJoyFlat(BaseTask):
                 avg_norm = sum(self._obs_timings['camera_normalize'][-10:]) / min(10, len(self._obs_timings['camera_normalize']))
                 print(f"     - Get Depth:          {avg_get*1000:6.2f} ms")
                 print(f"     - Normalize:          {avg_norm*1000:6.2f} ms")
+            # 显示相机更新间隔信息
+            if self._camera_update_interval > 1:
+                update_ratio = 100.0 / self._camera_update_interval
+                print(f"     ⚡ Update Interval:    {self._camera_update_interval}x (camera updated {update_ratio:.1f}% of steps)")
             print(f"  {'─'*70}")
             print(f"  ⏱️  TOTAL OBSERVATIONS:  {t_obs_total*1000:6.2f} ms")
             print(f"{'='*70}\n")

@@ -233,6 +233,13 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         enable_tensors = True  # GPU 优化
         use_collision_geometry = False
         
+        # 🚀 性能优化：相机更新频率控制
+        # 相机渲染是性能瓶颈，通过降低更新频率可以显著提升训练速度
+        update_interval = 2  # 每 N 个策略步更新一次相机（2 = 每两步更新一次）
+                             # 1 = 每步更新（默认，最精确但最慢）
+                             # 2 = 每两步更新（推荐，速度提升 ~1.5x，精度损失很小）
+                             # 4 = 每四步更新（更快 ~1.8x，但可能影响视觉依赖的任务）
+        
         body_name = "base"  # main body link in sirius URDF
         position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
         rpy = [0.0, 0.785398, 0.0]  # pitch down ~45 degrees (positive = looking down)
@@ -307,14 +314,14 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
         use_clipped_value_loss = True
         clip_param = 0.2
         
-        # 学习配置（1024 envs）
-        num_learning_epochs = 8   # 每次更新的epoch数
+        # 学习配置（256 envs）
+        num_learning_epochs = 16   # 每次更新的epoch数
         num_mini_batches = 2      # mini-batch数量
-        learning_rate = 2.5e-4    # 学习率（For 512 env）
+        learning_rate = 2.5e-4    # 学习率（For 256 env）
         schedule = 'adaptive'     # 自适应学习率调度
         gamma = 0.99              # 折扣因子
         lam = 0.95                # GAE lambda
-        desired_kl = 0.01         # 目标KL散度
+        desired_kl = 0.015         # 目标KL散度
         max_grad_norm = 1.0       # 梯度裁剪
     
     class runner(SiriusSharedPPOCfg.runner):
@@ -326,7 +333,7 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
         max_iterations = 3000  # 增加到3000次迭代，确保有足够时间完成课程
         
         # 数据收集
-        num_steps_per_env = 24  # 每个env收集的步数
+        num_steps_per_env = 48  # 每个env收集的步数
         
         # 保存和日志
         save_interval = 25
