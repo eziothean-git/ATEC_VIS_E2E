@@ -690,23 +690,28 @@ class SiriusJoyFlat(BaseTask):
         """ 
         Randomly select commands of some environments
         
-        🔧 改进 1: 偏向前进采样（90% 前进，10% 后退）
-        🔧 改进 2: 使用互斥模式避免同时高速行走和快速旋转
-        - 80% 直行模式: 主要线速度，角速度降低到30%（允许轻微转向）
-        - 20% 转向模式: 主要角速度，线速度降低到30%（慢速转向/原地转）
-        🔧 改进 3: 前进速度最小值为 0.15 m/s，避免采样到过小的速度
-
+        🔧 改进版采样策略：支持全方向随机运动
+        
+        采样策略：
+        1. 速度方向：随机采样 x 和 y 方向，支持任意方向运动
+        2. 速度大小：保证最小前进速度，避免速度过小
+        3. 运动模式：
+           - 60% 直行为主模式：角速度降低，专注线速度跟随
+           - 30% 混合模式：线速度和角速度都正常
+           - 10% 转向为主模式：线速度降低，专注转向控制
+        
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
-        # 🆕 偏向前进的采样：90% 前进，10% 后退
+        # ============ 1. 线速度 X 方向采样 ============
+        # 70% 前进，30% 后退/静止 - 更平衡的前后采样
         direction_selector = torch.rand(len(env_ids), device=self.device)
-        forward_mask = direction_selector < 0.9  # 90% 前进
-        backward_mask = ~forward_mask  # 10% 后退
+        forward_mask = direction_selector < 0.7  # 70% 前进
+        backward_mask = ~forward_mask  # 30% 后退
         
-        # 前进命令：从 [min_forward_speed, max] 采样，确保至少 0.15 m/s
+        # 前进命令：从 [min_forward_speed, max] 采样
         if forward_mask.any():
-            min_forward_speed = getattr(self.cfg.commands, 'min_forward_speed', 0.15)  # 最小前进速度 (m/s)
+            min_forward_speed = getattr(self.cfg.commands, 'min_forward_speed', 0.2)
             max_forward_speed = self.command_ranges["lin_vel_x"][1]
             self.commands[env_ids[forward_mask], 0] = torch_rand_float(
                 min_forward_speed, 
@@ -724,27 +729,52 @@ class SiriusJoyFlat(BaseTask):
                 device=self.device
             ).squeeze(1)
         
-        # 横向速度和角速度正常采样
-        self.commands[env_ids, 1] = torch_rand_float(self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+        # ============ 2. 线速度 Y 方向采样（横向/侧向运动）============
+        # 全范围随机采样，支持各个方向运动
+        self.commands[env_ids, 1] = torch_rand_float(
+            self.command_ranges["lin_vel_y"][0], 
+            self.command_ranges["lin_vel_y"][1], 
+            (len(env_ids), 1), 
+            device=self.device
+        ).squeeze(1)
+        
+        # ============ 3. 角速度采样 ============
         if self.cfg.commands.heading_command:
-            self.commands[env_ids, 3] = torch_rand_float(self.command_ranges["heading"][0], self.command_ranges["heading"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+            self.commands[env_ids, 3] = torch_rand_float(
+                self.command_ranges["heading"][0], 
+                self.command_ranges["heading"][1], 
+                (len(env_ids), 1), 
+                device=self.device
+            ).squeeze(1)
         else:
-            self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
+            self.commands[env_ids, 2] = torch_rand_float(
+                self.command_ranges["ang_vel_yaw"][0], 
+                self.command_ranges["ang_vel_yaw"][1], 
+                (len(env_ids), 1), 
+                device=self.device
+            ).squeeze(1)
 
-        # 🆕 互斥模式: 避免同时高速 + 高旋转
+        # ============ 4. 运动模式：避免同时高速+高旋转 ============
         mode_selector = torch.rand(len(env_ids), device=self.device)
         
-        # 80% 直行模式: 角速度降低到30%（允许轻微转向调整）
-        straight_mode = mode_selector < 0.8
+        # 60% 直行为主模式：角速度降低到30%
+        straight_mode = mode_selector < 0.6
         self.commands[env_ids[straight_mode], 2] *= 0.3
         
-        # 20% 转向模式: 线速度降低到30%（慢速转向或原地转）
-        turning_mode = ~straight_mode
-        self.commands[env_ids[turning_mode], 0] *= 0.3
-        self.commands[env_ids[turning_mode], 1] *= 0.3
+        # 30% 混合模式：都不降低（保持原样）
+        mixed_mode = (mode_selector >= 0.6) & (mode_selector < 0.9)
+        # 不修改 mixed_mode 的命令
+        
+        # 10% 转向为主模式：线速度降低到40%（允许慢速转向）
+        turning_mode = mode_selector >= 0.9
+        self.commands[env_ids[turning_mode], 0] *= 0.4
+        self.commands[env_ids[turning_mode], 1] *= 0.4
 
-        # set small commands to zero
-        self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > 0.2).unsqueeze(1)
+        # ============ 5. 过滤过小的命令 ============
+        # 将幅值小于 0.15 m/s 的线速度命令置零（避免过小的扰动）
+        lin_vel_norm = torch.norm(self.commands[env_ids, :2], dim=1)
+        small_cmd_mask = lin_vel_norm < 0.15
+        self.commands[env_ids[small_cmd_mask], :2] = 0.0
 
     def _compute_torques(self, actions):
         """ Compute torques from actions.

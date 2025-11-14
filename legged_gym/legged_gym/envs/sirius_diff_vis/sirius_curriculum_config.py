@@ -52,6 +52,7 @@ Sirius 课程学习配置 - 使用官方 terrain.py 的 curriculum 模式训练�
 """
 
 import torch
+import numpy as np
 from isaacgym import gymtorch
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfgPPO
 from legged_gym.envs.sirius_diff_vis.sirius_flat_config import SiriusFlatCfg
@@ -139,12 +140,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_tracking_lin_vel
             # 公式: r = exp(-||v_cmd_xy - v_base_xy||^2 / tracking_sigma)
             # 周期: 每步
-            tracking_lin_vel = 5.0
+            tracking_lin_vel = 15.0
 
             # 实现路径: sirius_joystick.py::_reward_tracking_ang_vel
             # 公式: r = exp(-(ω_cmd_z - ω_base_z)^2 / tracking_sigma)
             # 周期: 每步
-            tracking_ang_vel = 2.5
+            tracking_ang_vel = 10
 
             # 实现路径: sirius_joystick.py::_reward_orientation
             # 公式: r = g_x^2 + g_y^2（projected_gravity 前两轴平方和）
@@ -174,12 +175,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_posture
             # 公式: r = exp( - Σ (q - q_default)^2 · w )，w = [1,1,0.1]×4
             # 周期: 每步
-            posture = 1.0
+            posture = 0.5
 
             # 实现路径: sirius_joystick.py::_reward_collision
             # 公式: r = Σ 1{ ||F_contact|| > 0.1 }（在 penalised_contact_indices 上）
             # 周期: 每步
-            collision = -1.0
+            collision = -2.5
 
             # 实现路径: sirius_joystick.py::_reward_slip
             # 公式: r = Σ_i 1{contact_i} · ||v_foot_i,xy||^2；并在 ||v_cmd_xy|| > 0.05 m/s 时才计入
@@ -190,7 +191,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_stand_still
             # 公式: r = Σ |q - q_default| · 1{ ||v_cmd_xy|| < 0.1 }
             # 周期: 每步（仅当指令近零时）
-            stand_still = -2.5
+            stand_still = -2
 
             # === 事件驱动 Event-based ===
             # 实现路径: sirius_joystick.py::_reward_feet_air_time
@@ -201,23 +202,24 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_stumble
             # 公式: 1{ ||F_xy|| > 5 * |F_z| }
             # 周期: 每步（布尔事件）
-            stumble = -1.5
+            stumble = -1.0
 
             # === 终止惩罚 Termination ===
             # 实现路径: sirius_joystick.py::_reward_termination
             # 公式: 1{reset_buf & ¬time_out_buf}；不乘以 dt
-            termination = -5.0
+            termination = -100.0
     
     class commands(SiriusFlatCfg.commands):
         # 🎯 课程学习：命令速度也从简单开始逐渐增加
         curriculum = True
         max_curriculum = 0.8  # 最大前进速度命令（m/s）
         max_reverse_curriculum = 0.1  # 🔧 最大后退速度命令（m/s）- 限制后退速度以保证安全
-        min_forward_speed = 0.3  # 🔧 最小前进速度（m/s）- 避免采样到过小的速度导致机器人几乎不动
-        curriculum_step = 0.15    # 🔧 每次达标后扩展 lin_vel_x 范围的步长（m/s）
+        min_forward_speed = 0.2  # 🔧 最小前进速度（m/s）- 避免采样到过小的速度导致机器人几乎不动
+        curriculum_step = 0.1    # 🔧 每次达标后扩展 lin_vel_x 范围的步长（m/s）
+        curriculum_threshold = 0.5  # 🔧 达标阈值：tracking reward 达到 50% 即可晋级（降低难度）
         class ranges:
             lin_vel_x = [-0.1, 0.3]     
-            lin_vel_y = [-0.1, 0.1]   
+            lin_vel_y = [-0.3, 0.3]   # 🔧 增大横向速度范围，支持更多方向运动
             ang_vel_yaw = [-0.6, 0.6]   
             heading = [-3.14, 3.14]
 
@@ -307,7 +309,7 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
     # 算法配置
     class algorithm(SiriusSharedPPOCfg.algorithm):
         # 🎯 课程学习需要更多探索，尤其是在早期简单地形阶段
-        entropy_coef = 0.05  # 提高熵系数，鼓励探索新策略
+        entropy_coef = 0.015  # 提高熵系数，鼓励探索新策略
         
         # PPO 超参数
         value_loss_coef = 1.0
@@ -333,7 +335,7 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
         max_iterations = 3000  # 增加到3000次迭代，确保有足够时间完成课程
         
         # 数据收集
-        num_steps_per_env = 48  # 每个env收集的步数
+        num_steps_per_env = 32  # 每个env收集的步数
         
         # 保存和日志
         save_interval = 25
@@ -678,5 +680,120 @@ class SiriusCurriculum(SiriusJoyFlat):
             self.sim,
             gymtorch.unwrap_tensor(self._actor_root_states),
             gymtorch.unwrap_tensor(actor_ids_int32),
-            len(actor_ids_int32),
+            len(actor_ids_int32)
         )
+    
+    def _update_terrain_curriculum(self, env_ids):
+        """
+        更新地形课程难度
+        
+        🔧 修复：调整晋级/降级条件，防止难度增长过快
+        
+        原始逻辑问题：
+        - 晋级条件太宽松：走 4m（地形长度一半）就晋级
+        - 降级条件太严格：需要走完目标距离的50%才不降级
+        - 结果：机器人在还没学会跟随速度时就被推到高难度地形
+        
+        修复方案：
+        - 晋级条件：需要走到地形长度的 70% 才晋级（更严格）
+        - 降级条件：如果走不到地形长度的 30% 则降级（更宽松）
+        - 同时考虑速度跟随质量：tracking reward < 40% 时不晋级
+        
+        Args:
+            env_ids (List[int]): 需要重置的环境ID
+        """
+        if not self.init_done:
+            return
+        
+        # 计算每个环境走过的距离
+        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
+        
+        # 🔧 更严格的晋级条件：
+        # 1. 走到地形长度的 70% 以上
+        # 2. 且 tracking reward 足够好（episode平均 > 40%）
+        move_up_distance = distance > (self.terrain.env_length * 0.7)
+        
+        # 检查 tracking reward（如果有的话）
+        if hasattr(self, 'episode_sums') and 'tracking_lin_vel' in self.episode_sums:
+            tracking_quality = (self.episode_sums["tracking_lin_vel"][env_ids] / 
+                              torch.clamp(self.episode_length_buf[env_ids], min=1).float())
+            target_reward = 0.4 * self.reward_scales.get("tracking_lin_vel", 1.0)
+            move_up = move_up_distance & (tracking_quality > target_reward)
+        else:
+            move_up = move_up_distance
+        
+        # 🔧 更宽松的降级条件：走不到地形长度的 30% 才降级
+        move_down = (distance < self.terrain.env_length * 0.3) & (~move_up)
+        
+        # 更新地形难度
+        self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        
+        # 达到最高难度的机器人随机分配到中等难度（保持挑战性）
+        max_level = self.max_terrain_level
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= max_level,
+            torch.randint_like(self.terrain_levels[env_ids], max_level // 2, max_level),  # 随机到中高难度
+            torch.clip(self.terrain_levels[env_ids], 0, max_level - 1)
+        )
+        
+        # 更新环境原点
+        self.env_origins[env_ids] = self.terrain_origins[
+            self.terrain_levels[env_ids], 
+            self.terrain_types[env_ids]
+        ]
+        
+        # 🐛 调试：定期打印课程进度
+        if self.common_step_counter % 1000 == 0:
+            avg_level = self.terrain_levels.float().mean().item()
+            max_current = self.terrain_levels.max().item()
+            print(f"[Terrain Curriculum] Avg level: {avg_level:.2f}, Max: {max_current}/{max_level}")
+    
+    def update_command_curriculum(self, env_ids):
+        """
+        更新命令速度课程
+        
+        🔧 修复：降低晋级阈值，使命令范围能更快扩展
+        
+        原始逻辑问题：
+        - 需要 tracking reward 达到 80% 才扩展命令范围
+        - 阈值过高导致命令范围长期停留在初始值
+        - 机器人无法练习更高速度，形成恶性循环
+        
+        修复方案：
+        - 降低阈值到 50%（可配置）
+        - 步长更小（0.1 m/s）避免突然变化
+        - 同时扩展前进和后退范围
+        
+        Args:
+            env_ids (List[int]): 环境ID（实际未使用，因为命令范围是全局的）
+        """
+        if not hasattr(self, 'episode_sums') or 'tracking_lin_vel' not in self.episode_sums:
+            return
+        
+        # 计算所有环境的平均 tracking reward
+        # 注意：这里不限制 env_ids，因为命令范围是全局共享的
+        avg_tracking_reward = torch.mean(self.episode_sums["tracking_lin_vel"]) / self.max_episode_length
+        target_reward = getattr(self.cfg.commands, 'curriculum_threshold', 0.5) * self.reward_scales["tracking_lin_vel"]
+        
+        # 如果达标，扩展命令范围
+        if avg_tracking_reward > target_reward:
+            step = getattr(self.cfg.commands, 'curriculum_step', 0.1)
+            
+            # 扩展前进速度
+            self.command_ranges["lin_vel_x"][1] = np.clip(
+                self.command_ranges["lin_vel_x"][1] + step,
+                0.,
+                self.cfg.commands.max_curriculum
+            )
+            
+            # 扩展后退速度（如果有配置）
+            if hasattr(self.cfg.commands, 'max_reverse_curriculum'):
+                self.command_ranges["lin_vel_x"][0] = np.clip(
+                    self.command_ranges["lin_vel_x"][0] - step * 0.5,  # 后退速度增长更慢
+                    -self.cfg.commands.max_reverse_curriculum,
+                    0.
+                )
+            
+            # 🐛 调试：打印课程进度
+            print(f"[Command Curriculum] Extended lin_vel_x range to [{self.command_ranges['lin_vel_x'][0]:.2f}, {self.command_ranges['lin_vel_x'][1]:.2f}]")
+            print(f"  Avg tracking reward: {avg_tracking_reward:.3f} > {target_reward:.3f}")
