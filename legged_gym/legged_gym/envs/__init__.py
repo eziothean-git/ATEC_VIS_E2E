@@ -69,6 +69,20 @@ from .sirius_diff_vis.sirius_curriculum_config import (
     SiriusCurriculumCfgPPO,
 )
 
+# 导入IL训练任务（阶段1：平地并行训练）
+from .sirius_diff_vis.sirius_curriculum_il_config import (
+    SiriusCurriculumIL,
+    SiriusCurriculumILCfg,
+    SiriusCurriculumILCfgPPO,
+)
+
+# 导入微调任务（阶段2：curriculum地形后训练）
+from .sirius_diff_vis.sirius_curriculum_finetune_config import (
+    SiriusCurriculumFinetune,
+    SiriusCurriculumFinetuneCfg,
+    SiriusCurriculumFinetuneCfgPPO,
+)
+
 # 注册统一的 diff_vis 任务名，供 python train.py --task=sirius_diff_vis 使用
 # 这里直接使用两段桥环境
 task_registry.register(
@@ -84,5 +98,21 @@ task_registry.register(
     SiriusCurriculum,
     SiriusCurriculumCfg(),
     SiriusCurriculumCfgPPO(),
+)
+
+# 注册IL训练任务（阶段1）
+task_registry.register(
+    "sirius_curriculum_il",
+    SiriusCurriculumIL,
+    SiriusCurriculumILCfg(),
+    SiriusCurriculumILCfgPPO(),
+)
+
+# 注册微调任务（阶段2）
+task_registry.register(
+    "sirius_curriculum_finetune",
+    SiriusCurriculumFinetune,
+    SiriusCurriculumFinetuneCfg(),
+    SiriusCurriculumFinetuneCfgPPO(),
 )
 

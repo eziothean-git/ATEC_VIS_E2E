@@ -1474,7 +1474,7 @@ class SiriusJoyFlat(BaseTask):
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         if self.cfg.terrain.measure_heights:
             self.height_points = self._init_height_points()
-        self.measured_heights = 0
+        self.measured_heights = None  # 初始化为 None，在有地形测量时会被更新为 tensor
 
         # joint positions offsets and PD gains
         self.default_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
@@ -2000,8 +2000,14 @@ class SiriusJoyFlat(BaseTask):
     def _reward_base_height(self):
         # Penalize base height away from target
         # 计算机器人相对于当前地形的高度（脚下地形的平均高度）
-        terrain_height = torch.mean(self.measured_heights, dim=1)  # [num_envs]
-        base_height_above_terrain = self.root_states[:, 2] - terrain_height  # [num_envs]
+        
+        # 如果启用了地形高度测量，使用相对高度
+        if hasattr(self, 'measured_heights') and self.measured_heights is not None:
+            terrain_height = torch.mean(self.measured_heights, dim=1)  # [num_envs]
+            base_height_above_terrain = self.root_states[:, 2] - terrain_height  # [num_envs]
+        else:
+            # 平地环境：直接使用绝对高度（假设地面在 z=0）
+            base_height_above_terrain = self.root_states[:, 2]  # [num_envs]
         
         # 目标是保持在地形上方 base_height_target 的高度
         # 这样在平地、dimps、斜坡等各种地形都能自适应

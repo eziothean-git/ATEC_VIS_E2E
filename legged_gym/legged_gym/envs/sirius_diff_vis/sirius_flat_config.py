@@ -123,70 +123,71 @@ class SiriusFlatCfg( LeggedRobotCfg ):
 
     # camera defaults for sirius
     class camera(LeggedRobotCfg.camera):
-        """深度相机配置 - 用于端到端视觉强化学习"""
-        enable = True  # 启用相机（阶段1和阶段2都需要）
+        """深度相机配置 - 教师策略训练时关闭"""
+        enable = False  # ❌ 教师策略不使用视觉（纯本体感知）
         body_name = "base"  # main body link in sirius URDF
         position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
         rpy = [0.0, 0.6, 0.0]  # pitch down ~34 degrees (positive = looking down)
-        
-        # 降低分辨率以减少计算负担
-        width = 87  # 原 160 -> 87 (约 0.54x)
-        height = 58  # 原 120 -> 58 (约 0.48x)
-        horizontal_fov = 90.0
-        
-        # 深度范围
-        max_depth = 5.0  # 限制在5米以内（桥梁场景足够）
-        near_plane = 0.1
-        far_plane = 10.0
-        
-        # 调试选项（训练时关闭以提高性能）
-        debug_outputs = False
-        use_collision_geometry = False
-        
-        # ⚠️ 性能关键：使用 GPU tensor 路径避免 CPU-GPU 传输
-        # enable_tensors = True 会直接在 GPU 上生成深度图 tensor
-        # 避免 CPU → NumPy → PyTorch → GPU 的转换链
-        enable_tensors = True  # ✅ 启用 GPU tensor 路径
 
 class SiriusFlatCfgPPO( LeggedRobotCfgPPO ):
     """
     Sirius 平地任务的 PPO 训练配置。
     
-    继承共享模型配置 (SiriusSharedPPOCfg)，确保与 sirius_diff_vis 任务的网络结构一致。
-    只覆盖 runner 中的任务特定参数（实验名、迭代次数等）。
+    ⚠️ 使用纯本体感知的 MLP 网络（无视觉）
+    - 输入: 45维本体观测
+    - 网络: MLP [256, 128, 64]
+    - 输出: 12维动作
+    
+    这个配置用于训练教师策略，后续会通过 IL 迁移到带视觉的学生策略。
     """
     
-    # 继承共享的 vision_encoder 配置（视觉编码器）
-    class vision_encoder(SiriusSharedPPOCfg.vision_encoder):
-        pass
+    # ========== 不继承视觉配置 ==========
+    # vision_encoder: 不需要（纯本体感知）
     
-    # 继承共享的 policy 配置（网络结构）
-    class policy(SiriusSharedPPOCfg.policy):
-        # 使用共享配置的 [256, 128, 64]
-        # 不要在这里覆盖 actor_hidden_dims 或 critic_hidden_dims！
-        pass
+    # ========== Policy 配置 ==========
+    class policy(LeggedRobotCfgPPO.policy):
+        """纯本体感知的 MLP 策略"""
+        # 网络结构（与共享配置一致，方便后续迁移）
+        init_noise_std = 1.0
+        actor_hidden_dims = [256, 128, 64]
+        critic_hidden_dims = [256, 128, 64]
+        activation = 'elu'
+        
+        # ⚠️ 不使用视觉
+        # 这里不设置 use_vision 和 vision_latent_dim，
+        # 让 ActorCritic 自动判断为纯 MLP 模式
     
-    # 继承共享的 algorithm 配置（PPO 超参数）
-    class algorithm(SiriusSharedPPOCfg.algorithm):
-        # 降低学习率到 1/4，因为只能跑 1024 envs 而非 4096
-        # 原始: 1.e-3, 现在: 2.5e-4
-        learning_rate = 2.5e-4
-        
-        # GPU 利用率优化：增加学习轮数补偿环境数减少
-        # 原始 5 epochs * 4096 envs = 20480 samples/update
-        # 现在 8 epochs * 1024 envs = 8192 samples/update (仍少于原始)
-        # 但能提高学习阶段的 GPU 利用率
-        num_learning_epochs = 8  # 从 5 增加到 8
-        
-        # 可选：减少 mini_batches 以增加每批的大小
-        # mini_batch_size = (num_envs * num_steps_per_env) / num_mini_batches
-        # 原始: (4096 * 24) / 4 = 24576
-        # 现在: (1024 * 24) / 2 = 12288 (更大的批量利用 GPU)
-        num_mini_batches = 2  # 从 4 减少到 2
+    # ========== Algorithm 配置 ==========
+    class algorithm(LeggedRobotCfgPPO.algorithm):
+        """PPO 超参数"""
+        # 基础 PPO 参数
+        value_loss_coef = 1.0
+        use_clipped_value_loss = True
+        clip_param = 0.2
+        entropy_coef = 0.01
+        num_learning_epochs = 5
+        num_mini_batches = 4
+        learning_rate = 1.e-3  # 标准学习率（4096 envs）
+        schedule = 'adaptive'
+        gamma = 0.99
+        lam = 0.95
+        desired_kl = 0.01
+        max_grad_norm = 1.0
 
-    # 任务特定的 runner 配置
-    class runner(SiriusSharedPPOCfg.runner):
+    # ========== Runner 配置 ==========
+    class runner(LeggedRobotCfgPPO.runner):
+        """训练运行配置"""
         run_name = ''
-        experiment_name = "sirius_flat"  # 阶段1: 平地训练
-        load_run = -1
+        experiment_name = "sirius_flat"  # 教师策略训练
+        
+        # ⚠️ 使用标准的 ActorCritic（纯 MLP）
+        policy_class_name = 'ActorCritic'  # 不是 'VisionProprioceptionActorCritic'
+        
+        # 训练配置
         max_iterations = 1800
+        save_interval = 100
+        
+        # 日志和checkpoint
+        load_run = -1
+        checkpoint = -1
+        resume = False

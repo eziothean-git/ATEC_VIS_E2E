@@ -148,12 +148,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_tracking_lin_vel
             # 公式: r = exp(-||v_cmd_xy - v_base_xy||^2 / tracking_sigma)
             # 周期: 每步
-            tracking_lin_vel = 2.5
+            tracking_lin_vel = 15
 
             # 实现路径: sirius_joystick.py::_reward_tracking_ang_vel
             # 公式: r = exp(-(ω_cmd_z - ω_base_z)^2 / tracking_sigma)
             # 周期: 每步
-            tracking_ang_vel = 2
+            tracking_ang_vel = 10
 
             # 实现路径: sirius_joystick.py::_reward_orientation
             # 公式: r = g_x^2 + g_y^2（projected_gravity 前两轴平方和）
@@ -331,8 +331,8 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
         clip_param = 0.2
         
         # 学习配置（256 envs）
-        num_learning_epochs = 16   # 每次更新的epoch数
-        num_mini_batches = 2      # mini-batch数量
+        num_learning_epochs = 10   # 每次更新的epoch数
+        num_mini_batches = 4      # mini-batch数量
         learning_rate = 2.5e-4    # 学习率（For 256 env）
         schedule = 'adaptive'     # 自适应学习率调度
         gamma = 0.99              # 折扣因子
