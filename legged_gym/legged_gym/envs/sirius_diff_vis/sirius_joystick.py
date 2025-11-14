@@ -96,10 +96,29 @@ class SiriusJoyFlat(BaseTask):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
+        import time
+        
+        # 初始化性能统计字典
+        if not hasattr(self, '_perf_counter'):
+            self._perf_counter = 0
+            self._perf_print_interval = 100  # 每100步打印一次
+        
+        self._perf_counter += 1
+        t_start = time.perf_counter()
+        
+        # 1. 动作裁剪
+        t0 = time.perf_counter()
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
-        # step physics and render each frame
+        t_clip_actions = time.perf_counter() - t0
+        
+        # 2. 渲染
+        t0 = time.perf_counter()
         self.render()
+        t_render = time.perf_counter() - t0
+        
+        # 3. 物理仿真循环
+        t0 = time.perf_counter()
         for _ in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
@@ -107,13 +126,39 @@ class SiriusJoyFlat(BaseTask):
             if self.device == 'cpu':
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
+        t_physics_sim = time.perf_counter() - t0
+        
+        # 4. 后处理物理步
+        t0 = time.perf_counter()
         self.post_physics_step()
-
-        # return clipped obs, clipped states (None), rewards, dones and infos
+        t_post_physics = time.perf_counter() - t0
+        
+        # 5. 观测裁剪
+        t0 = time.perf_counter()
         clip_obs = self.cfg.normalization.clip_observations
         self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
+        t_clip_obs = time.perf_counter() - t0
+        
+        # 总耗时
+        t_total = time.perf_counter() - t_start
+        
+        # 定期打印性能统计
+        if self._perf_counter % self._perf_print_interval == 0:
+            print(f"\n{'='*70}")
+            print(f"⏱️  Step Performance Profiling (Step {self._perf_counter})")
+            print(f"{'='*70}")
+            print(f"  1. Clip Actions:     {t_clip_actions*1000:6.2f} ms ({t_clip_actions/t_total*100:5.1f}%)")
+            print(f"  2. Render:           {t_render*1000:6.2f} ms ({t_render/t_total*100:5.1f}%)")
+            print(f"  3. Physics Sim:      {t_physics_sim*1000:6.2f} ms ({t_physics_sim/t_total*100:5.1f}%)")
+            print(f"  4. Post Physics:     {t_post_physics*1000:6.2f} ms ({t_post_physics/t_total*100:5.1f}%)")
+            print(f"  5. Clip Obs:         {t_clip_obs*1000:6.2f} ms ({t_clip_obs/t_total*100:5.1f}%)")
+            print(f"  {'─'*70}")
+            print(f"  ⏱️  TOTAL:            {t_total*1000:6.2f} ms")
+            print(f"  📊 FPS:              {1.0/t_total:6.1f} steps/sec")
+            print(f"{'='*70}\n")
+        
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
 
     def post_physics_step(self):
@@ -121,40 +166,121 @@ class SiriusJoyFlat(BaseTask):
             calls self._post_physics_step_callback() for common computations 
             calls self._draw_debug_vis() if needed
         """
+        import time
+        
+        # 初始化子步骤计时器
+        if not hasattr(self, '_post_physics_timings'):
+            self._post_physics_timings = {
+                'refresh_tensors': [],
+                'prepare_quantities': [],
+                'callback': [],
+                'check_termination': [],
+                'compute_reward': [],
+                'reset_idx': [],
+                'compute_observations': [],
+                'update_buffers': [],
+                'camera_display': [],
+                'debug_viz': []
+            }
+        
+        t_start_post = time.perf_counter()
+        
+        # 1. 刷新张量
+        t0 = time.perf_counter()
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
+        t_refresh = time.perf_counter() - t0
+        self._post_physics_timings['refresh_tensors'].append(t_refresh)
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
 
-        # prepare quantities
+        # 2. 准备基础量
+        t0 = time.perf_counter()
         self.base_quat[:] = self.root_states[:, 3:7]
         self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
+        t_prepare = time.perf_counter() - t0
+        self._post_physics_timings['prepare_quantities'].append(t_prepare)
 
+        # 3. 回调函数（命令重采样、地形高度等）
+        t0 = time.perf_counter()
         self._post_physics_step_callback()
+        t_callback = time.perf_counter() - t0
+        self._post_physics_timings['callback'].append(t_callback)
 
-        # compute observations, rewards, resets, ...
+        # 4. 检查终止
+        t0 = time.perf_counter()
         self.check_termination()
+        t_termination = time.perf_counter() - t0
+        self._post_physics_timings['check_termination'].append(t_termination)
+        
+        # 5. 计算奖励
+        t0 = time.perf_counter()
         self.compute_reward()
+        t_reward = time.perf_counter() - t0
+        self._post_physics_timings['compute_reward'].append(t_reward)
+        
+        # 6. 重置环境
+        t0 = time.perf_counter()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
-        self.compute_observations() # in some cases a simulation step might be required to refresh some obs (for example body positions)
+        t_reset = time.perf_counter() - t0
+        self._post_physics_timings['reset_idx'].append(t_reset)
+        
+        # 7. 计算观测（包括相机）
+        t0 = time.perf_counter()
+        self.compute_observations()
+        t_obs = time.perf_counter() - t0
+        self._post_physics_timings['compute_observations'].append(t_obs)
 
+        # 8. 更新缓冲区
+        t0 = time.perf_counter()
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
+        t_update = time.perf_counter() - t0
+        self._post_physics_timings['update_buffers'].append(t_update)
 
-        # update camera display at a lower rate when running with a viewer
+        # 9. 相机显示更新
+        t0 = time.perf_counter()
         if not self.headless and getattr(self, '_camera_initialized', False):
             try:
                 self._maybe_update_camera_display()
             except Exception:
                 pass
+        t_camera = time.perf_counter() - t0
+        self._post_physics_timings['camera_display'].append(t_camera)
 
+        # 10. 调试可视化
+        t0 = time.perf_counter()
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
+        t_debug = time.perf_counter() - t0
+        self._post_physics_timings['debug_viz'].append(t_debug)
+        
+        # 总耗时
+        t_total_post = time.perf_counter() - t_start_post
+        
+        # 定期打印详细的 post_physics_step 性能统计
+        if hasattr(self, '_perf_counter') and self._perf_counter % self._perf_print_interval == 0:
+            print(f"\n{'='*70}")
+            print(f"📊 Post-Physics Step Breakdown (Step {self._perf_counter})")
+            print(f"{'='*70}")
+            print(f"  1. Refresh Tensors:      {t_refresh*1000:6.2f} ms ({t_refresh/t_total_post*100:5.1f}%)")
+            print(f"  2. Prepare Quantities:   {t_prepare*1000:6.2f} ms ({t_prepare/t_total_post*100:5.1f}%)")
+            print(f"  3. Callback:             {t_callback*1000:6.2f} ms ({t_callback/t_total_post*100:5.1f}%)")
+            print(f"  4. Check Termination:    {t_termination*1000:6.2f} ms ({t_termination/t_total_post*100:5.1f}%)")
+            print(f"  5. Compute Reward:       {t_reward*1000:6.2f} ms ({t_reward/t_total_post*100:5.1f}%)")
+            print(f"  6. Reset Idx:            {t_reset*1000:6.2f} ms ({t_reset/t_total_post*100:5.1f}%)")
+            print(f"  7. Compute Observations: {t_obs*1000:6.2f} ms ({t_obs/t_total_post*100:5.1f}%)")
+            print(f"  8. Update Buffers:       {t_update*1000:6.2f} ms ({t_update/t_total_post*100:5.1f}%)")
+            print(f"  9. Camera Display:       {t_camera*1000:6.2f} ms ({t_camera/t_total_post*100:5.1f}%)")
+            print(f" 10. Debug Viz:            {t_debug*1000:6.2f} ms ({t_debug/t_total_post*100:5.1f}%)")
+            print(f"  {'─'*70}")
+            print(f"  ⏱️  TOTAL POST-PHYSICS:  {t_total_post*1000:6.2f} ms")
+            print(f"{'='*70}\n")
 
     def check_termination(self):
         """ Check if environments need to be reset
@@ -255,7 +381,23 @@ class SiriusJoyFlat(BaseTask):
               ⚠️ 重要：高度测量 (measure_heights) 仅用于奖励计算，不输入模型！
               这样确保训练和部署时模型输入维度一致（部署时无法获取地形高度）。
         """
-        # 本体感觉观测 (proprioception): 45维
+        import time
+        
+        # 初始化观测计时器
+        if not hasattr(self, '_obs_timings'):
+            self._obs_timings = {
+                'proprioception': [],
+                'terrain_heights': [],
+                'noise': [],
+                'camera_get': [],
+                'camera_normalize': [],
+                'camera_total': []
+            }
+        
+        t_obs_start = time.perf_counter()
+        
+        # 1. 本体感觉观测 (proprioception): 45维
+        t0 = time.perf_counter()
         self.obs_buf = torch.cat((  self.base_ang_vel  * self.obs_scales.ang_vel, # 3dim
                                     self.projected_gravity, # 3dim
                                     self.commands[:, :3] * self.commands_scale, # 3dim
@@ -263,22 +405,34 @@ class SiriusJoyFlat(BaseTask):
                                     self.dof_vel * self.obs_scales.dof_vel, # 12dim
                                     self.actions # 12dim
                                     ),dim=-1)
+        t_proprio = time.perf_counter() - t0
+        self._obs_timings['proprioception'].append(t_proprio)
         
-        # 地形高度测量：仅用于奖励计算，不输入模型（保证部署一致性）
+        # 2. 地形高度测量：仅用于奖励计算，不输入模型（保证部署一致性）
+        t0 = time.perf_counter()
         if self.cfg.terrain.measure_heights:
             # 更新内部状态，用于 _reward_base_height() 等奖励函数
             # 注意：不添加到 obs_buf！
             pass
+        t_heights = time.perf_counter() - t0
+        self._obs_timings['terrain_heights'].append(t_heights)
         
-        # add noise if needed
+        # 3. 添加噪声
+        t0 = time.perf_counter()
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
+        t_noise = time.perf_counter() - t0
+        self._obs_timings['noise'].append(t_noise)
         
-        # 获取深度图像观测 (vision): (num_envs, H, W) → (num_envs, 1, H, W)
+        # 4. 获取深度图像观测 (vision): (num_envs, H, W) → (num_envs, 1, H, W)
+        t_camera_start = time.perf_counter()
         if getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized:
             try:
-                # 获取深度图 (num_envs, H, W)，已经线性化并clip到[0, max_depth]
+                # 4a. 获取深度图
+                t0 = time.perf_counter()
                 depth_images = self.get_camera_depth_images(as_torch=True, return_mask=False)
+                t_camera_get = time.perf_counter() - t0
+                self._obs_timings['camera_get'].append(t_camera_get)
                 
                 # Debug: Log camera configuration on first call
                 if not hasattr(self, '_camera_obs_logged'):
@@ -287,12 +441,13 @@ class SiriusJoyFlat(BaseTask):
                     print(f"[Compute Obs] Depth device={depth_images.device}, shape={depth_images.shape}, dtype={depth_images.dtype}")
                     self._camera_obs_logged = True
                 
-                # 归一化到 [0, 1]
+                # 4b. 归一化到 [0, 1] 并添加通道维度
+                t0 = time.perf_counter()
                 max_depth = float(getattr(self.cfg.camera, 'max_depth', 5.0))
                 depth_normalized = depth_images / max_depth
-                
-                # 添加通道维度: (num_envs, H, W) → (num_envs, 1, H, W)
                 self.depth_obs_buf = depth_normalized.unsqueeze(1)
+                t_camera_normalize = time.perf_counter() - t0
+                self._obs_timings['camera_normalize'].append(t_camera_normalize)
                 
             except Exception as e:
                 # 如果相机未初始化或出错，使用零填充
@@ -319,6 +474,30 @@ class SiriusJoyFlat(BaseTask):
                     dtype=torch.float32,
                     device=self.device
                 )
+        
+        t_camera_total = time.perf_counter() - t_camera_start
+        self._obs_timings['camera_total'].append(t_camera_total)
+        
+        # 总耗时
+        t_obs_total = time.perf_counter() - t_obs_start
+        
+        # 定期打印详细的观测计算性能统计
+        if hasattr(self, '_perf_counter') and self._perf_counter % self._perf_print_interval == 0:
+            print(f"\n{'='*70}")
+            print(f"🔍 Compute Observations Breakdown (Step {self._perf_counter})")
+            print(f"{'='*70}")
+            print(f"  1. Proprioception:       {t_proprio*1000:6.2f} ms ({t_proprio/t_obs_total*100:5.1f}%)")
+            print(f"  2. Terrain Heights:      {t_heights*1000:6.2f} ms ({t_heights/t_obs_total*100:5.1f}%)")
+            print(f"  3. Add Noise:            {t_noise*1000:6.2f} ms ({t_noise/t_obs_total*100:5.1f}%)")
+            print(f"  4. Camera (Total):       {t_camera_total*1000:6.2f} ms ({t_camera_total/t_obs_total*100:5.1f}%)")
+            if len(self._obs_timings['camera_get']) > 0:
+                avg_get = sum(self._obs_timings['camera_get'][-10:]) / min(10, len(self._obs_timings['camera_get']))
+                avg_norm = sum(self._obs_timings['camera_normalize'][-10:]) / min(10, len(self._obs_timings['camera_normalize']))
+                print(f"     - Get Depth:          {avg_get*1000:6.2f} ms")
+                print(f"     - Normalize:          {avg_norm*1000:6.2f} ms")
+            print(f"  {'─'*70}")
+            print(f"  ⏱️  TOTAL OBSERVATIONS:  {t_obs_total*1000:6.2f} ms")
+            print(f"{'='*70}\n")
 
     def create_sim(self):
         """ Creates simulation, terrain and evironments
@@ -830,8 +1009,8 @@ class SiriusJoyFlat(BaseTask):
         """Render and return stacked depth images from all env cameras.
         Returns a tensor/ndarray of shape (num_envs, H, W). Depth is in meters.
         
-        GPU-optimized version: Uses GPU tensor API when cfg.camera.enable_tensors=True
-        to avoid CPU-GPU transfers.
+        🚀 OPTIMIZED: Uses Isaac Gym's start_access_image_tensors() / end_access_image_tensors()
+        to batch GPU tensor access and avoid repeated CPU-GPU synchronization.
         """
         if not (getattr(self.cfg, 'camera', None) is not None and self.cfg.camera.enable and self._camera_initialized):
             raise RuntimeError("Camera is not enabled or not initialized. Set cfg.camera.enable=True before creating the env.")
@@ -856,32 +1035,41 @@ class SiriusJoyFlat(BaseTask):
         if not hasattr(self, '_depth_path_logged'):
             enable_tensors_config = getattr(self.cfg.camera, 'enable_tensors', False)
             print(f"[Camera Debug] enable_tensors={enable_tensors_config}, as_torch={as_torch}, use_tensor_api={use_tensor_api}")
-            print(f"[Camera Debug] Using {'GPU tensor path (FAST) ✅' if use_tensor_api else 'CPU/NumPy path (SLOW) ⚠️'}")
+            print(f"[Camera Debug] Using {'GPU tensor path with batch access (FASTEST) ✅✅✅' if use_tensor_api else 'CPU/NumPy path (SLOW) ⚠️'}")
             self._depth_path_logged = True
         
         if use_tensor_api:
-            # ========== GPU Tensor Path (Optimized) ==========
+            # ========== GPU Tensor Path (OPTIMIZED with Batch Access) ==========
             import torch as _torch
             from isaacgym import gymtorch
             
-            # Get camera image tensors directly on GPU (zero-copy!)
-            imgs = []
-            for i in range(self.num_envs):
-                if i < created:
-                    # Get tensor directly on GPU (no CPU transfer!)
-                    depth_tensor = self.gym.get_camera_image_gpu_tensor(
-                        self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH
-                    )
-                    # Wrap as PyTorch tensor (zero-copy view)
-                    depth_torch = gymtorch.wrap_tensor(depth_tensor)
-                    imgs.append(depth_torch)
-                else:
-                    # Placeholder for envs without cameras
-                    device = self.device if hasattr(self, 'device') else 'cuda:0'
-                    imgs.append(_torch.full((H, W), max_depth, dtype=_torch.float32, device=device))
+            # 🚀 CRITICAL OPTIMIZATION: Use start/end_access_image_tensors to batch GPU access
+            # This prevents repeated CPU-GPU synchronization and dramatically improves performance
+            self.gym.start_access_image_tensors(self.sim)
             
-            # Stack on GPU (no CPU involved!)
-            arr_raw = _torch.stack(imgs, dim=0)  # [num_envs, H, W]
+            try:
+                # Get camera image tensors directly on GPU (zero-copy!)
+                imgs = []
+                for i in range(self.num_envs):
+                    if i < created:
+                        # Get tensor directly on GPU (no CPU transfer!)
+                        depth_tensor = self.gym.get_camera_image_gpu_tensor(
+                            self.sim, self.envs[i], self.camera_handles[i], gymapi.IMAGE_DEPTH
+                        )
+                        # Wrap as PyTorch tensor (zero-copy view)
+                        depth_torch = gymtorch.wrap_tensor(depth_tensor)
+                        imgs.append(depth_torch)
+                    else:
+                        # Placeholder for envs without cameras
+                        device = self.device if hasattr(self, 'device') else 'cuda:0'
+                        imgs.append(_torch.full((H, W), max_depth, dtype=_torch.float32, device=device))
+                
+                # Stack on GPU (no CPU involved!)
+                arr_raw = _torch.stack(imgs, dim=0)  # [num_envs, H, W]
+                
+            finally:
+                # 🚀 CRITICAL: Always call end_access_image_tensors to release GPU sync lock
+                self.gym.end_access_image_tensors(self.sim)
             
             # Process on GPU
             arr_linear = arr_raw.clone()

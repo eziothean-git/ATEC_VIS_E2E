@@ -69,10 +69,10 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
     class env(SiriusFlatCfg.env):
         num_observations = 45  # 本体观测（不包含高度测量，保证部署一致性）
         episode_length_s = 24  # 🎯 缩短episode，加快curriculum迭代和学习循环
-        num_envs = 1024  # 建议用较多envs覆盖更多地形
+        num_envs = 512  # 建议用较多envs覆盖更多地形
 
     class terrain(SiriusFlatCfg.terrain):
-        mesh_type = "trimesh"  # 必须用 trimesh 或 heightfield
+        mesh_type = "heightfield"  # 🚀 使用 heightfield（比 trimesh 效率高得多！）
         
         # ⚠️ 启用课程学习！
         curriculum = True
@@ -229,11 +229,11 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         horizontal_fov = 90.0
         max_depth = 5.0
         near_plane = 0.05
-        far_plane = 15.0
+        far_plane = 5.0
         enable_tensors = True  # GPU 优化
         use_collision_geometry = False
         
-        body_name = "trunk"  # main body link in sirius URDF
+        body_name = "base"  # main body link in sirius URDF
         position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
         rpy = [0.0, 0.785398, 0.0]  # pitch down ~45 degrees (positive = looking down)
 
@@ -275,11 +275,11 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         quantization_levels_range = [256, 64]  # 量化级别：从256级（高精度）降到64级（低精度）
         
         # 模糊效果（模拟镜头失焦、运动模糊）
-        blur_curriculum = False
+        blur_curriculum = True
         blur_kernel_range = [0, 3]  # 模糊核大小：从0（无模糊）到3x3
         
         # 随机亮度/对比度调整（模拟光照变化）
-        brightness_curriculum = False
+        brightness_curriculum = True
         brightness_range = [0.8, 1.2]    # 亮度倍数范围：0.8-1.2x
         contrast_range = [0.8, 1.2]      # 对比度倍数范围：0.8-1.2x
 
@@ -310,7 +310,7 @@ class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
         # 学习配置（1024 envs）
         num_learning_epochs = 8   # 每次更新的epoch数
         num_mini_batches = 2      # mini-batch数量
-        learning_rate = 2.5e-4    # 学习率（与sirius_flat相同）
+        learning_rate = 2.5e-4    # 学习率（For 512 env）
         schedule = 'adaptive'     # 自适应学习率调度
         gamma = 0.99              # 折扣因子
         lam = 0.95                # GAE lambda
