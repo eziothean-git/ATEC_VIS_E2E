@@ -111,7 +111,7 @@ class SiriusCurriculumILCfg(SiriusCurriculumCfg):
         
         # 调试输出
         debug_outputs = True
-        display_interval_steps = 2000
+        display_interval_steps = 24000  # 每24000步显示一次（与训练步数匹配）
         
     class commands(SiriusCurriculumCfg.commands):
         """命令配置 - 与教师策略保持一致（使用 heading_command 和课程）"""
@@ -121,7 +121,7 @@ class SiriusCurriculumILCfg(SiriusCurriculumCfg):
         max_reverse_curriculum = 0.1
         min_forward_speed = 0.2
         curriculum_step = 0.1
-        curriculum_threshold = 0.8
+        curriculum_threshold = 0.7
         
         # 🔥 关键：使用 heading_command 模式，朝向与速度方向对齐
         heading_command = True
@@ -200,8 +200,8 @@ class SiriusCurriculumILCfgPPO(SiriusCurriculumCfgPPO):
         imitation_curriculum = True
         imitation_coef_schedule = {
             'start': 1.0,    # 初始权重
-            'end': 0.2,      # 最终权重
-            'iterations': 750,  # 在750次迭代内线性衰减
+            'end': 0.025,      # 最终权重
+            'iterations': 1250,  # 在1250次迭代内线性衰减
         }
         
         # ========== PPO 超参数 ==========
@@ -240,8 +240,8 @@ class SiriusCurriculumILCfgPPO(SiriusCurriculumCfgPPO):
         teacher_model_path = "/home/eziothean/ATEC_VIS_E2E/legged_gym/logs/sirius_teacher_curriculum/Nov14_22-58-38_/model_2250.pt"
         
         # ========== 训练配置 ==========
-        max_iterations = 2000  # 阶段1训练迭代数
-        num_steps_per_env = 24  # 与教师策略相同
+        max_iterations = 3500  # 阶段1训练迭代数
+        num_steps_per_env = 48
         
         # 保存和日志
         save_interval = 50  # 每50次迭代保存一次
