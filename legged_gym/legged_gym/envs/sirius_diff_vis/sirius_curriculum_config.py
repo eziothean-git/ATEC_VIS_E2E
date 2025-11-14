@@ -68,7 +68,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
     
     class env(SiriusFlatCfg.env):
         num_observations = 45  # 本体观测（不包含高度测量，保证部署一致性）
-        episode_length_s = 48.0  # 🎯 缩短episode，加快curriculum迭代和学习循环
+        episode_length_s = 24  # 🎯 缩短episode，加快curriculum迭代和学习循环
         num_envs = 1024  # 建议用较多envs覆盖更多地形
 
     class terrain(SiriusFlatCfg.terrain):
@@ -88,7 +88,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         num_cols = 8          # 地形类型数量（8种地形）- 修正：make_terrain实际只有8种
         
         # 🎯 课程学习关键：从最低难度开始！
-        max_init_terrain_level = 2  # 最大初始难度级别（索引0-1，对应难度0.0-0.1）
+        max_init_terrain_level = 1  # 最大初始难度级别（索引0-1，对应难度0.0-0.1）
                                      # 机器人将从简单地形开始，逐步晋级
         
         # 🎨 视觉多样性增强：在简单课程的同时，保留少量环境在复杂地形做"视觉探索"
@@ -116,45 +116,109 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         
     class rewards(SiriusFlatCfg.rewards):
         # 课程学习模式下的奖励调整
+        # 关闭仅正奖励裁剪，启用“复奖励”(保留负项) —— 让策略能明确感知惩罚来源
+        # 原因：only_positive_rewards=True 会在汇总非终止奖励后做 max(r_t, 0)，
+        #       使得负向 shaping 信息丢失，优化器不知道哪里做错。
+        only_positive_rewards = False
         class scales:
-            # 基础运动奖励
-            tracking_lin_vel = 5.0
-            tracking_ang_vel = 2.5
-            
-            # 稳定性奖励（对复杂地形很重要）
-            orientation = -0.75          # 惩罚倾斜
-            base_height = -0.1          # 保持高度（可选）
-            
-            # 平滑性奖励
-            lin_vel_z = -0.075            # 惩罚垂直速度
-            ang_vel_xy = -0.05          # 惩罚横滚/俯仰角速度
-            collision = -1.0            # 惩罚碰撞
-            action_rate = -0.01         # 惩罚动作变化率
-            
-            # 步态奖励
-            feet_air_time = 1.0         # 奖励腾空时间
-            stumble = -1.5              # 惩罚绊倒（对崎岖地形重要）
-            stand_still = -2.5          # 惩罚原地不动
-            
-            # 终止惩罚
-            termination = -5.0
+            # 计算周期与缩放说明：
+            # - 除 "termination" 以外，所有非零奖励权重会在环境初始化时被自动乘以 dt
+            #   (见 sirius_joystick.py::_prepare_reward_function)，因此：
+            #     配置的权重 ≈ 每秒权重，单步实际系数 = 配置权重 × dt。
+            # - "termination" 不乘以 dt，保持原始配置权重。
+            # - 如果 cfg.rewards.only_positive_rewards=True，则在加上 termination 之前，
+            #   会先将该步的总奖励截断为非负（max(r_t, 0)）。
+            #
+            # 单步总奖励公式（t 表示当前步）：
+            #   r_t = Σ_{i≠termination} (w_i · dt) · r_i,t
+            #   if only_positive_rewards: r_t = max(r_t, 0)
+            #   r_t += w_term · r_term,t
+            # 其中 r_term,t = 1{reset_buf & ¬time_out_buf}
 
-            orientation = -1.5       # 强姿态惩罚（与 flat 一致）
-            feet_air_time = 0.5      # 腾空奖励（与 flat 一致）
-            base_height = -0.5     # 强高度惩罚（与 flat 一致）
-            posture = 1.0            # 姿态奖励（与 flat 一致）
+            # === 每步（连续）Per-step continuous ===
+            # 实现路径: sirius_joystick.py::_reward_tracking_lin_vel
+            # 公式: r = exp(-||v_cmd_xy - v_base_xy||^2 / tracking_sigma)
+            # 周期: 每步
+            tracking_lin_vel = 5.0
+
+            # 实现路径: sirius_joystick.py::_reward_tracking_ang_vel
+            # 公式: r = exp(-(ω_cmd_z - ω_base_z)^2 / tracking_sigma)
+            # 周期: 每步
+            tracking_ang_vel = 2.5
+
+            # 实现路径: sirius_joystick.py::_reward_orientation
+            # 公式: r = g_x^2 + g_y^2（projected_gravity 前两轴平方和）
+            # 周期: 每步
+            orientation = -0.5
+
+            # 实现路径: sirius_joystick.py::_reward_base_height
+            # 公式: r = ( (z - mean(measured_heights)) - base_height_target )^2
+            # 周期: 每步
+            base_height = -0.5
+
+            # 实现路径: sirius_joystick.py::_reward_lin_vel_z
+            # 公式: r = v_z^2
+            # 周期: 每步
+            lin_vel_z = -0.075
+
+            # 实现路径: sirius_joystick.py::_reward_ang_vel_xy
+            # 公式: r = ω_x^2 + ω_y^2
+            # 周期: 每步
+            ang_vel_xy = -0.05
+
+            # 实现路径: sirius_joystick.py::_reward_action_rate
+            # 公式: r = Σ (a_t - a_{t-1})^2
+            # 周期: 每步
+            action_rate = -0.01
+
+            # 实现路径: sirius_joystick.py::_reward_posture
+            # 公式: r = exp( - Σ (q - q_default)^2 · w )，w = [1,1,0.1]×4
+            # 周期: 每步
+            posture = 1.0
+
+            # 实现路径: sirius_joystick.py::_reward_collision
+            # 公式: r = Σ 1{ ||F_contact|| > 0.1 }（在 penalised_contact_indices 上）
+            # 周期: 每步
+            collision = -1.0
+
+            # 实现路径: sirius_joystick.py::_reward_slip
+            # 公式: r = Σ_i 1{contact_i} · ||v_foot_i,xy||^2；并在 ||v_cmd_xy|| > 0.05 m/s 时才计入
+            # 周期: 每步（接触且通过门控）
+            slip = -0.5
+
+            # === 每步（条件触发）Per-step conditioned ===
+            # 实现路径: sirius_joystick.py::_reward_stand_still
+            # 公式: r = Σ |q - q_default| · 1{ ||v_cmd_xy|| < 0.1 }
+            # 周期: 每步（仅当指令近零时）
+            stand_still = -2.5
+
+            # === 事件驱动 Event-based ===
+            # 实现路径: sirius_joystick.py::_reward_feet_air_time
+            # 流程: feet_air_time 累积，first_contact 时按 (air_time - 0.5) 计一次奖励
+            # 周期: 首次接触事件
+            feet_air_time = 0.5
+
+            # 实现路径: sirius_joystick.py::_reward_stumble
+            # 公式: 1{ ||F_xy|| > 5 * |F_z| }
+            # 周期: 每步（布尔事件）
+            stumble = -1.5
+
+            # === 终止惩罚 Termination ===
+            # 实现路径: sirius_joystick.py::_reward_termination
+            # 公式: 1{reset_buf & ¬time_out_buf}；不乘以 dt
+            termination = -5.0
     
     class commands(SiriusFlatCfg.commands):
         # 🎯 课程学习：命令速度也从简单开始逐渐增加
         curriculum = True
         max_curriculum = 0.8  # 最大前进速度命令（m/s）
         max_reverse_curriculum = 0.1  # 🔧 最大后退速度命令（m/s）- 限制后退速度以保证安全
-        min_forward_speed = 0.15  # 🔧 最小前进速度（m/s）- 避免采样到过小的速度导致机器人几乎不动
-        
+        min_forward_speed = 0.3  # 🔧 最小前进速度（m/s）- 避免采样到过小的速度导致机器人几乎不动
+        curriculum_step = 0.15    # 🔧 每次达标后扩展 lin_vel_x 范围的步长（m/s）
         class ranges:
-            lin_vel_x = [-0.1, 0.3]     # 🎯 初始前进速度范围较小（从0.5而非0.8开始）
-            lin_vel_y = [-0.1, 0.1]   # 🎯 初始横向速度范围较小
-            ang_vel_yaw = [-0.6, 0.6]   # 🔧 降低转向速度（从 ±0.8 改为 ±0.6，约 ±34°/s）
+            lin_vel_x = [-0.1, 0.3]     
+            lin_vel_y = [-0.1, 0.1]   
+            ang_vel_yaw = [-0.6, 0.6]   
             heading = [-3.14, 3.14]
 
     class camera(SiriusFlatCfg.camera):
@@ -165,12 +229,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         horizontal_fov = 90.0
         max_depth = 5.0
         near_plane = 0.05
-        far_plane = 10.0
+        far_plane = 15.0
         enable_tensors = True  # GPU 优化
         use_collision_geometry = False
         
         # 🔍 启用调试输出：定期保存深度图到磁盘
-        debug_outputs = False
+        debug_outputs = True
         display_interval_steps = 50  # 每50个仿真步保存一次（避免IO过载）
         
         # 🎯 渐进式数据增强（Data Augmentation Curriculum）
@@ -212,10 +276,8 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
 class SiriusCurriculumCfgPPO(LeggedRobotCfgPPO):
     """
     Sirius 课程学习任务的 PPO 训练配置
-    
     使用与 sirius_flat 相同的网络结构，但训练策略针对课程学习优化
     """
-    
     # 继承共享的 vision_encoder 配置
     class vision_encoder(SiriusSharedPPOCfg.vision_encoder):
         pass

@@ -196,8 +196,17 @@ class SiriusJoyFlat(BaseTask):
         self.reset_buf[env_ids] = 1
         # fill extras
         self.extras["episode"] = {}
+        # Per-episode logging: scaled per-second rewards and normalized mean raw components
         for key in self.episode_sums.keys():
-            self.extras["episode"]['rew_' + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            # average scaled contribution per second (existing behavior)
+            scaled_per_sec = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            self.extras["episode"][f'rew_{key}'] = scaled_per_sec
+            # normalized mean raw component per step (divide by w_i, not dt)
+            if key in self.reward_scales and key != "termination":
+                # reward_scales[key] == w_i * dt (after _prepare_reward_function)
+                scale_without_dt = (self.reward_scales[key] / self.dt)
+                norm_mean_raw = scaled_per_sec / (scale_without_dt + 1e-8)
+                self.extras["episode"][f'norm_{key}'] = norm_mean_raw
             self.episode_sums[key][env_ids] = 0.
         # log additional curriculum info
         if self.cfg.terrain.curriculum:
@@ -214,11 +223,20 @@ class SiriusJoyFlat(BaseTask):
             adds each terms to the episode sums and to the total reward
         """
         self.rew_buf[:] = 0.
+        # step-wise normalized reward (mean raw r_i per step across envs)
+        if "step" not in self.extras:
+            self.extras["step"] = {}
         for i in range(len(self.reward_functions)):
             name = self.reward_names[i]
             rew = self.reward_functions[i]() * self.reward_scales[name]
             self.rew_buf += rew
             self.episode_sums[name] += rew
+            # normalized mean raw component per step (divide out scale)
+            scale_dt = float(self.reward_scales[name]) if isinstance(self.reward_scales[name], (int, float)) else self.reward_scales[name]
+            eps = 1e-8
+            mean_raw = torch.mean(rew) / (scale_dt + eps)
+            # log under step/norm_<name>
+            self.extras["step"][f"norm_{name}"] = mean_raw
         if self.cfg.rewards.only_positive_rewards:
             self.rew_buf[:] = torch.clip(self.rew_buf[:], min=0.)
         # add termination reward after clipping
@@ -730,10 +748,9 @@ class SiriusJoyFlat(BaseTask):
         # If the tracking reward is above 70% of the maximum, increase the range of commands
         if avg_reward > threshold:
             old_range = [self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1]]
-            # 🔧 修复：后退速度限制为 -0.15 m/s，前进速度可达 0.6 m/s（非对称）
-            # 🆕 渐进式增长：小步长 0.1 m/s（而非 0.5），实现平滑过渡
+            # 🔧 非对称限幅：后退与前进各自有最大幅度；步长可由配置项控制
             max_reverse = getattr(self.cfg.commands, 'max_reverse_curriculum', 0.15)  # 默认 0.15 m/s
-            step_size = 0.1  # 渐进步长（从 0.5 改为 0.1）
+            step_size = float(getattr(self.cfg.commands, 'curriculum_step', 0.1))  # 可配置的步长（m/s）
             self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - step_size, -max_reverse, 0.)
             self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + step_size, 0., self.cfg.commands.max_curriculum)
             print(f"   ✅ CURRICULUM ADVANCED: lin_vel_x [{old_range[0]:.2f}, {old_range[1]:.2f}] → [{self.command_ranges['lin_vel_x'][0]:.2f}, {self.command_ranges['lin_vel_x'][1]:.2f}]")
@@ -1145,10 +1162,13 @@ class SiriusJoyFlat(BaseTask):
         """
         # get gym GPU state tensors
         actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        # rigid body states (pos [3], rot [4], lin_vel [3], ang_vel [3]) per body
+        rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
         dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
         net_contact_forces = self.gym.acquire_net_contact_force_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
         self.gym.refresh_actor_root_state_tensor(self.sim)
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
         # create some wrapper tensors for different slices
@@ -1162,6 +1182,10 @@ class SiriusJoyFlat(BaseTask):
         self.actors_per_env = num_total_actors // self.num_envs
         self._actor_root_states = root_states_all
         self.root_states = root_states_all[:self.num_envs]
+
+        # wrap rigid body states to [num_total_actors, num_bodies, 13] then slice robots
+        rb_states_all = gymtorch.wrap_tensor(rigid_body_state_tensor).view(num_total_actors, -1, 13)
+        self.rigid_body_states = rb_states_all[:self.num_envs]
 
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
@@ -1712,3 +1736,26 @@ class SiriusJoyFlat(BaseTask):
     def _reward_posture(self):
         weight = torch.tensor([1.0, 1.0, 0.1] * 4, device=self.device).unsqueeze(0) # shape: (1, num_dof)
         return torch.exp(-torch.sum(torch.square(self.dof_pos - self.default_dof_pos) * weight, dim=1))
+
+    def _reward_slip(self):
+        """Penalize foot slipping while in contact (stance).
+
+        Returns per-env sum over feet of tangential (XY) linear velocity squared when in contact.
+        Shape: (num_envs,)
+        """
+        # Determine stance by positive normal contact force
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+
+        # Ensure rigid body states are up-to-date (contains per-body lin/ang velocities)
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+
+        # Rigid body linear velocities in world frame: indices 7:10; take XY components
+        foot_lin_vel_xy = self.rigid_body_states[:, self.feet_indices, 7:9]
+        vxy_sq = torch.sum(torch.square(foot_lin_vel_xy), dim=-1)
+
+        # Gate by commanded planar speed > 0.05 m/s to avoid penalizing tiny jitters
+        cmd_gate = (torch.norm(self.commands[:, :2], dim=1) > 0.05).float().unsqueeze(1)
+
+        # Apply stance mask and gate; sum across feet
+        slip_mag = vxy_sq * contact.float() * cmd_gate
+        return torch.sum(slip_mag, dim=1)
