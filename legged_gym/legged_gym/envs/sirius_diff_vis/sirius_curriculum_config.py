@@ -140,7 +140,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_tracking_lin_vel
             # 公式: r = exp(-||v_cmd_xy - v_base_xy||^2 / tracking_sigma)
             # 周期: 每步
-            tracking_lin_vel = 15.0
+            tracking_lin_vel = 10.0
 
             # 实现路径: sirius_joystick.py::_reward_tracking_ang_vel
             # 公式: r = exp(-(ω_cmd_z - ω_base_z)^2 / tracking_sigma)
@@ -160,7 +160,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_lin_vel_z
             # 公式: r = v_z^2
             # 周期: 每步
-            lin_vel_z = -0.075
+            lin_vel_z = -0.0125
 
             # 实现路径: sirius_joystick.py::_reward_ang_vel_xy
             # 公式: r = ω_x^2 + ω_y^2
@@ -170,7 +170,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_action_rate
             # 公式: r = Σ (a_t - a_{t-1})^2
             # 周期: 每步
-            action_rate = -0.01
+            action_rate = -0.025
 
             # 实现路径: sirius_joystick.py::_reward_posture
             # 公式: r = exp( - Σ (q - q_default)^2 · w )，w = [1,1,0.1]×4
@@ -202,12 +202,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_stumble
             # 公式: 1{ ||F_xy|| > 5 * |F_z| }
             # 周期: 每步（布尔事件）
-            stumble = -1.0
+            stumble = -0.5
 
             # === 终止惩罚 Termination ===
             # 实现路径: sirius_joystick.py::_reward_termination
             # 公式: 1{reset_buf & ¬time_out_buf}；不乘以 dt
-            termination = -100.0
+            termination = -1000.0
     
     class commands(SiriusFlatCfg.commands):
         # 🎯 课程学习：命令速度也从简单开始逐渐增加

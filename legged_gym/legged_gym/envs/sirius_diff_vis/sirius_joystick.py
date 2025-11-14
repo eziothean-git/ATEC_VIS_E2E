@@ -706,8 +706,8 @@ class SiriusJoyFlat(BaseTask):
         # ============ 1. 线速度 X 方向采样 ============
         # 70% 前进，30% 后退/静止 - 更平衡的前后采样
         direction_selector = torch.rand(len(env_ids), device=self.device)
-        forward_mask = direction_selector < 0.7  # 70% 前进
-        backward_mask = ~forward_mask  # 30% 后退
+        forward_mask = direction_selector < 0.85  # 85% 前进
+        backward_mask = ~forward_mask  # 15% 后退
         
         # 前进命令：从 [min_forward_speed, max] 采样
         if forward_mask.any():
