@@ -125,7 +125,7 @@ class SiriusFlatCfg( LeggedRobotCfg ):
     class camera(LeggedRobotCfg.camera):
         """深度相机配置 - 用于端到端视觉强化学习"""
         enable = True  # 启用相机（阶段1和阶段2都需要）
-        body_name = "trunk"  # main body link in sirius URDF
+        body_name = "base"  # main body link in sirius URDF
         position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
         rpy = [0.0, 0.6, 0.0]  # pitch down ~34 degrees (positive = looking down)
         
