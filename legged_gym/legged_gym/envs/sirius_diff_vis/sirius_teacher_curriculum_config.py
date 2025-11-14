@@ -212,8 +212,17 @@ class SiriusTeacherCurriculum(SiriusJoyFlat):
         2. 保留基础的命令重采样和朝向转换
         3. 保留地形高度测量和推机器人逻辑
         """
+        # 🔥 强制打印：每次都打印（前10次）
+        if self.common_step_counter < 10:
+            print(f"🔥 [_post_physics_step_callback] Step {self.common_step_counter}")
+        
         # 1) 命令重采样
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(as_tuple=False).flatten()
+        
+        # 🔥 强制打印
+        if self.common_step_counter < 10 and len(env_ids) > 0:
+            print(f"   Resampling {len(env_ids)} envs, heading_command={self.cfg.commands.heading_command}")
+        
         self._resample_commands(env_ids)
 
         # 2) heading_command 模式：将朝向目标转换为角速度命令
@@ -227,31 +236,6 @@ class SiriusTeacherCurriculum(SiriusJoyFlat):
                 0.5 * wrap_to_pi(self.commands[:, 3] - heading),
                 -1., 1.
             )
-            
-            # 🐛 调试：每1000步检查朝向转换
-            if self.common_step_counter % 1000 == 0:
-                sample_size = min(5, self.num_envs)
-                sample_ids = torch.arange(sample_size, device=self.device)
-                
-                print(f"\n{'='*70}")
-                print(f"[Heading to AngVel Conversion] Step {self.common_step_counter}")
-                print(f"{'='*70}")
-                
-                for i, env_id in enumerate(sample_ids):
-                    target_heading = self.commands[env_id, 3].item()
-                    curr_heading = heading[env_id].item()
-                    ang_vel_cmd = self.commands[env_id, 2].item()
-                    actual_ang_vel = self.base_ang_vel[env_id, 2].item()
-                    
-                    heading_error = wrap_to_pi(self.commands[env_id, 3] - heading[env_id]).item()
-                    
-                    print(f"  Env {env_id.item():4d}: "
-                          f"target={target_heading*180/3.14159:+6.1f}°, "
-                          f"current={curr_heading*180/3.14159:+6.1f}°, "
-                          f"error={heading_error*180/3.14159:+6.1f}°, "
-                          f"cmd_ω={ang_vel_cmd:+.3f}, "
-                          f"actual_ω={actual_ang_vel:+.3f}")
-                print(f"{'='*70}\n")
 
         # 3) 保持地形高度测量
         if self.cfg.terrain.measure_heights:
@@ -277,6 +261,11 @@ class SiriusTeacherCurriculum(SiriusJoyFlat):
         """
         import torch
         from isaacgym.torch_utils import torch_rand_float
+        
+        # 🔥 强制打印：前10次调用时每次都打印
+        if len(env_ids) > 0:
+            if self.common_step_counter < 10:
+                print(f"🔥 [_resample_commands] Step {self.common_step_counter}, resampling {len(env_ids)} envs")
         
         if len(env_ids) == 0:
             return
@@ -352,28 +341,6 @@ class SiriusTeacherCurriculum(SiriusJoyFlat):
                     (zero_vel_mask.sum(), 1),
                     device=self.device
                 ).squeeze(1)
-            
-            # 🐛 调试：每1000步检查朝向对齐
-            if self.common_step_counter % 1000 == 0 and len(env_ids) > 0:
-                sample_size = min(5, len(env_ids))
-                sample_env_ids = env_ids[:sample_size]
-                
-                print(f"\n{'='*70}")
-                print(f"[Heading Alignment Check] Step {self.common_step_counter}")
-                print(f"{'='*70}")
-                for env_id in sample_env_ids:
-                    vx = self.commands[env_id, 0].item()
-                    vy = self.commands[env_id, 1].item()
-                    heading = self.commands[env_id, 3].item()
-                    vel_dir = torch.atan2(torch.tensor(vy), torch.tensor(vx)).item()
-                    diff = abs(heading - vel_dir)
-                    diff = min(diff, 2*3.14159 - diff)  # 处理周期性
-                    
-                    print(f"  Env {env_id.item():4d}: vel=({vx:+.3f}, {vy:+.3f}), "
-                          f"vel_dir={vel_dir*180/3.14159:+6.1f}°, "
-                          f"heading={heading*180/3.14159:+6.1f}°, "
-                          f"diff={diff*180/3.14159:4.1f}°")
-                print(f"{'='*70}\n")
         else:
             # 如果不使用 heading_command，使用角速度
             self.commands[env_ids, 2] = torch_rand_float(
