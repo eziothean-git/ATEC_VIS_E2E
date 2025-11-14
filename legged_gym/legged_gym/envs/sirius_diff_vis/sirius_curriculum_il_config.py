@@ -43,10 +43,35 @@ class SiriusCurriculumILCfg(SiriusCurriculumCfg):
         episode_length_s = 20  # 适中的episode长度
     
     class terrain(SiriusCurriculumCfg.terrain):
-        # 🔧 阶段1: 在平地上训练（与教师策略环境一致）
-        mesh_type = "plane"  # 平地
-        curriculum = False   # 关闭地形课程
-        measure_heights = False  # 平地不需要高度测量
+        # 🔧 修改：使用 curriculum 地形（与教师策略训练环境一致）
+        mesh_type = "trimesh"  # Curriculum 地形
+        curriculum = True       # 启用地形课程
+        measure_heights = True  # 需要高度测量
+        
+        # 从较低难度开始
+        max_init_terrain_level = 1
+        
+        terrain_length = 8.0
+        terrain_width = 8.0
+        num_rows = 10
+        num_cols = 8
+        
+        curriculum_distribution = {
+            'easy_ratio': 0.80,
+            'medium_ratio': 0.15,
+            'exploration_ratio': 0.05,
+        }
+        
+        skip_terrain_types = [4, 5]  # 跳过障碍物、踏脚石
+        
+        horizontal_scale = 0.1
+        vertical_scale = 0.005
+        border_size = 20.0
+        terrain_proportions = [0.2, 0.2, 0.15, 0.15, 0.1, 0.1, 0.05, 0.05]
+        
+        static_friction = 1.0
+        dynamic_friction = 1.0
+        restitution = 0.0
         
     class camera(SiriusCurriculumCfg.camera):
         """相机配置 - 保守的数据增强策略"""
@@ -89,15 +114,23 @@ class SiriusCurriculumILCfg(SiriusCurriculumCfg):
         display_interval_steps = 2000
         
     class commands(SiriusCurriculumCfg.commands):
-        """命令配置 - 与教师策略保持一致"""
-        # 关闭命令课程（使用固定范围）
-        curriculum = False
+        """命令配置 - 与教师策略保持一致（使用 heading_command 和课程）"""
+        # 🔧 使用命令课程（与教师策略相同）
+        curriculum = True
+        max_curriculum = 0.8
+        max_reverse_curriculum = 0.1
+        min_forward_speed = 0.2
+        curriculum_step = 0.1
+        curriculum_threshold = 0.8
+        
+        # 🔥 关键：使用 heading_command 模式，朝向与速度方向对齐
+        heading_command = True
         
         class ranges:
-            # 与 sirius_flat 相同的速度范围
-            lin_vel_x = [-0.5, 1.0]   # 前后移动
-            lin_vel_y = [-0.3, 0.3]   # 横向移动
-            ang_vel_yaw = [-1.5, 1.5] # 转向
+            # 与教师策略相同的范围
+            lin_vel_x = [-0.1, 0.3]
+            lin_vel_y = [-0.3, 0.3]
+            ang_vel_yaw = [-0.6, 0.6]
             heading = [-3.14, 3.14]
             
     class rewards(SiriusCurriculumCfg.rewards):
@@ -200,22 +233,24 @@ class SiriusCurriculumILCfgPPO(SiriusCurriculumCfgPPO):
         
         # 实验名称
         experiment_name = "sirius_curriculum_il"
-        run_name = 'stage1_flat_parallel'
+        run_name = 'stage1_curriculum_parallel'
         
         # ========== 教师模型配置 ==========
-        # 需要在命令行指定或在这里硬编码
-        # 例如: teacher_model_path = "logs/sirius/2024-01-15/12-34-56/model_1800.pt"
-        teacher_model_path = None  # 在train.py中通过参数传入
+        # 🔥 设置教师模型路径
+        teacher_model_path = "/home/eziothean/ATEC_VIS_E2E/legged_gym/logs/sirius_teacher_curriculum/Nov14_22-58-38_/model_2250.pt"
         
         # ========== 训练配置 ==========
         max_iterations = 2000  # 阶段1训练迭代数
-        num_steps_per_env = 32  # 每个env收集的步数
+        num_steps_per_env = 24  # 与教师策略相同
         
         # 保存和日志
         save_interval = 50  # 每50次迭代保存一次
         
         # 策略类（与curriculum保持一致）
         policy_class_name = 'VisionProprioceptionActorCritic'
+        
+        # 🎓 算法类（使用PPOIL而不是PPO）
+        algorithm_class_name = 'PPOIL'
         
         # 从头开始训练（不从checkpoint恢复）
         resume = False
@@ -227,22 +262,29 @@ class SiriusCurriculumIL(SiriusCurriculum):
     """
     IL训练环境 - 继承自 SiriusCurriculum
     
-    主要修改：
-    - 使用平地地形（通过配置控制）
-    - 其他功能（相机、奖励等）与curriculum保持一致
+    主要特点：
+    - 使用 curriculum 地形（与教师策略一致）
+    - 使用 heading_command 模式（朝向与速度对齐）
+    - 相机增强、命令课程等与教师策略保持一致
     """
     
     def __init__(self, cfg: SiriusCurriculumILCfg, sim_params, physics_engine, sim_device, headless):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
         
-        print("[IL Training] Environment initialized")
-        print(f"  - Terrain: {self.cfg.terrain.mesh_type}")
+        print("\n" + "="*80)
+        print("🔥 [SiriusCurriculumIL] IL Training Environment initialized")
+        print(f"  - Terrain: {self.cfg.terrain.mesh_type} (curriculum={self.cfg.terrain.curriculum})")
         print(f"  - Camera: {self.cfg.camera.enable}")
         print(f"  - Num envs: {self.cfg.env.num_envs}")
+        print(f"  - heading_command: {self.cfg.commands.heading_command}")
+        print(f"  - Command curriculum: {self.cfg.commands.curriculum}")
+        print("="*80 + "\n")
     
-    # 所有其他功能继承自 SiriusCurriculum
-    # 包括：
+    # 所有其他功能继承自 SiriusCurriculum，包括：
+    #   - _post_physics_step_callback（支持 heading_command）
+    #   - _resample_commands（朝向对齐采样）
     #   - 相机数据增强
+    #   - 地形课程
+    #   - 命令课程
     #   - 奖励计算
     #   - 重置逻辑
-    #   - 等等

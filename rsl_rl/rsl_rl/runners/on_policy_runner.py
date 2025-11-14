@@ -36,7 +36,7 @@ import statistics
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
-from rsl_rl.algorithms import PPO
+from rsl_rl.algorithms import PPO, PPOIL
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.modules.vision_actor_critic import VisionProprioceptionActorCritic
 from rsl_rl.env import VecEnv
@@ -110,8 +110,49 @@ class OnPolicyRunner:
                 **self.policy_cfg
             ).to(self.device)
         
-        alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        # ========== 加载教师模型（如果是IL训练）==========
+        teacher_actor_critic = None
+        teacher_model_path = self.cfg.get("teacher_model_path", None)
+        use_imitation_loss = self.alg_cfg.get("use_imitation_loss", False)
+        
+        if use_imitation_loss and teacher_model_path:
+            print(f"\n🎓 [OnPolicyRunner] Loading teacher model for IL training")
+            print(f"  Teacher model path: {teacher_model_path}")
+            
+            # 创建教师模型（标准ActorCritic，45维本体感知）
+            # 教师模型不使用视觉，只用本体感知
+            teacher_num_obs = 45  # 硬编码教师观测维度
+            teacher_actor_critic = ActorCritic(
+                teacher_num_obs,
+                teacher_num_obs,  # critic也使用相同观测
+                self.env.num_actions,
+                **self.policy_cfg  # 复用相同的MLP架构配置
+            ).to(self.device)
+            
+            # 加载教师权重
+            try:
+                loaded_dict = torch.load(teacher_model_path, map_location=self.device)
+                teacher_actor_critic.load_state_dict(loaded_dict['model_state_dict'])
+                teacher_actor_critic.eval()
+                print(f"✅ Teacher model loaded successfully")
+                print(f"  Teacher uses {teacher_num_obs}-dim proprioception only")
+            except Exception as e:
+                print(f"❌ Failed to load teacher model: {e}")
+                teacher_actor_critic = None
+        
+        # ========== 创建算法 ==========
+        alg_class = eval(self.cfg["algorithm_class_name"]) # PPO or PPOIL
+        
+        # 如果是PPOIL，添加teacher参数
+        if alg_class.__name__ == 'PPOIL':
+            self.alg = alg_class(
+                actor_critic, 
+                teacher_actor_critic=teacher_actor_critic,
+                device=self.device, 
+                **self.alg_cfg
+            )
+        else:
+            self.alg = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
@@ -207,7 +248,16 @@ class OnPolicyRunner:
                 last_depth_obs = self.env.depth_obs_buf.to(self.device) if use_depth else None
                 self.alg.compute_returns(critic_obs, last_depth_obs)
             
-            mean_value_loss, mean_surrogate_loss = self.alg.update()
+            # 更新：支持IL返回值（PPOIL返回3个值，PPO返回2个值）
+            update_result = self.alg.update()
+            if len(update_result) == 3:
+                # PPOIL: (value_loss, surrogate_loss, imitation_loss)
+                mean_value_loss, mean_surrogate_loss, mean_imitation_loss = update_result
+            else:
+                # PPO: (value_loss, surrogate_loss)
+                mean_value_loss, mean_surrogate_loss = update_result
+                mean_imitation_loss = 0.0
+            
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
@@ -246,7 +296,14 @@ class OnPolicyRunner:
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         
-        # 🎬 Log FiLM gating statistics (if enabled)
+        # � Log IL loss (if using PPOIL)
+        if 'mean_imitation_loss' in locs and locs['mean_imitation_loss'] > 0:
+            self.writer.add_scalar('Loss/imitation', locs['mean_imitation_loss'], locs['it'])
+            # 同时记录当前IL系数
+            if hasattr(self.alg, 'current_imitation_coef'):
+                self.writer.add_scalar('IL/imitation_coef', self.alg.current_imitation_coef, locs['it'])
+        
+        # �🎬 Log FiLM gating statistics (if enabled)
         if hasattr(self.alg.actor_critic, 'use_film') and self.alg.actor_critic.use_film:
             self._log_film_statistics(locs['it'])
         

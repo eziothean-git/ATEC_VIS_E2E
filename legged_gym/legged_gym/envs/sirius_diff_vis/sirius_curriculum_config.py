@@ -230,7 +230,10 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         max_reverse_curriculum = 0.1  # 🔧 最大后退速度命令（m/s）- 限制后退速度以保证安全
         min_forward_speed = 0.2  # 🔧 最小前进速度（m/s）- 避免采样到过小的速度导致机器人几乎不动
         curriculum_step = 0.1    # 🔧 每次达标后扩展 lin_vel_x 范围的步长（m/s）
-        curriculum_threshold = 0.5  # 🔧 达标阈值：tracking reward 达到 50% 即可晋级（降低难度）
+        curriculum_threshold = 0.8  # 🔧 达标阈值：tracking reward 达到 80% 即可晋级
+        
+        heading_command = True  # 🔥 使用朝向目标而不是角速度，朝向与速度方向对齐
+        
         class ranges:
             lin_vel_x = [-0.1, 0.3]     
             lin_vel_y = [-0.3, 0.3]   # 🔧 增大横向速度范围，支持更多方向运动
@@ -376,6 +379,159 @@ class SiriusCurriculum(SiriusJoyFlat):
         # 初始化相机增强课程参数
         if hasattr(self.cfg, 'camera') and self.cfg.camera.enable:
             self._init_camera_augmentation_curriculum()
+        
+        print("\n" + "="*80)
+        print(f"🔥 [SiriusCurriculum] Environment initialized")
+        print(f"  - heading_command: {self.cfg.commands.heading_command}")
+        print(f"  - Command curriculum: {self.cfg.commands.curriculum}")
+        print("="*80 + "\n")
+    
+    def _post_physics_step_callback(self):
+        """
+        物理步进后的回调 - 课程学习版本
+        
+        🔧 关键改动：
+        1. 移除桥面中线纠偏逻辑（会覆盖速度命令）
+        2. 保留基础的命令重采样和朝向转换
+        3. 保持地形高度测量和推机器人逻辑
+        """
+        # 1) 命令重采样
+        env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(as_tuple=False).flatten()
+        self._resample_commands(env_ids)
+
+        # 2) heading_command 模式：将朝向目标转换为角速度命令
+        if self.cfg.commands.heading_command:
+            import torch
+            from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi
+            
+            forward = quat_apply_yaw(self.base_quat, self.forward_vec)
+            heading = torch.atan2(forward[:, 1], forward[:, 0])
+            self.commands[:, 2] = torch.clip(
+                0.5 * wrap_to_pi(self.commands[:, 3] - heading),
+                -1., 1.
+            )
+
+        # 3) 保持地形高度测量
+        if self.cfg.terrain.measure_heights:
+            self.measured_heights = self._get_heights()
+        
+        # 4) 保持推机器人逻辑
+        if self.cfg.domain_rand.push_robots and (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
+            self._push_robots()
+    
+    def _resample_commands(self, env_ids):
+        """
+        重采样命令 - 课程学习优化
+        
+        🎯 关键改进：朝向与速度方向对齐（正负5度范围内）
+        
+        策略：
+        1. 速度方向：随机采样 x 和 y 方向
+        2. 朝向命令：根据速度方向设置，只在目标方向正负5度范围内
+        3. 横向速度限制为前进速度的30%，避免纯侧向运动
+        
+        Args:
+            env_ids (List[int]): 需要重新采样命令的环境ID
+        """
+        import torch
+        from isaacgym.torch_utils import torch_rand_float
+        
+        if len(env_ids) == 0:
+            return
+        
+        # ============ 1. 线速度 X 方向采样 ============
+        direction_selector = torch.rand(len(env_ids), device=self.device)
+        forward_mask = direction_selector < 0.85  # 85% 前进
+        backward_mask = ~forward_mask  # 15% 后退
+        
+        # 前进命令
+        if forward_mask.any():
+            min_forward_speed = getattr(self.cfg.commands, 'min_forward_speed', 0.2)
+            max_forward_speed = self.command_ranges["lin_vel_x"][1]
+            self.commands[env_ids[forward_mask], 0] = torch_rand_float(
+                min_forward_speed, 
+                max_forward_speed, 
+                (forward_mask.sum(), 1), 
+                device=self.device
+            ).squeeze(1)
+        
+        # 后退命令
+        if backward_mask.any():
+            self.commands[env_ids[backward_mask], 0] = torch_rand_float(
+                self.command_ranges["lin_vel_x"][0], 
+                0., 
+                (backward_mask.sum(), 1), 
+                device=self.device
+            ).squeeze(1)
+        
+        # ============ 2. 线速度 Y 方向采样（限制为小偏移，避免纯侧向运动）============
+        forward_speed_abs = torch.abs(self.commands[env_ids, 0])
+        max_lateral_speed = torch.clamp(forward_speed_abs * 0.3, max=0.15)
+        
+        self.commands[env_ids, 1] = torch_rand_float(
+            -1.0, 
+            1.0, 
+            (len(env_ids), 1), 
+            device=self.device
+        ).squeeze(1) * max_lateral_speed
+        
+        small_forward_mask = forward_speed_abs < 0.1
+        self.commands[env_ids[small_forward_mask], 1] = 0.0
+        
+        # ============ 3. 朝向命令：与速度方向对齐（±5度）============
+        if self.cfg.commands.heading_command:
+            vel_x = self.commands[env_ids, 0]
+            vel_y = self.commands[env_ids, 1]
+            vel_direction = torch.atan2(vel_y, vel_x)
+            
+            heading_offset_range = 5.0 * (3.14159265359 / 180.0)
+            heading_offset = torch_rand_float(
+                -heading_offset_range,
+                heading_offset_range,
+                (len(env_ids), 1),
+                device=self.device
+            ).squeeze(1)
+            
+            self.commands[env_ids, 3] = vel_direction + heading_offset
+            self.commands[env_ids, 3] = torch.atan2(
+                torch.sin(self.commands[env_ids, 3]),
+                torch.cos(self.commands[env_ids, 3])
+            )
+            
+            vel_norm = torch.norm(self.commands[env_ids, :2], dim=1)
+            zero_vel_mask = vel_norm < 0.1
+            if zero_vel_mask.any():
+                self.commands[env_ids[zero_vel_mask], 3] = torch_rand_float(
+                    -heading_offset_range,
+                    heading_offset_range,
+                    (zero_vel_mask.sum(), 1),
+                    device=self.device
+                ).squeeze(1)
+        else:
+            self.commands[env_ids, 2] = torch_rand_float(
+                self.command_ranges["ang_vel_yaw"][0], 
+                self.command_ranges["ang_vel_yaw"][1], 
+                (len(env_ids), 1), 
+                device=self.device
+            ).squeeze(1)
+
+        # ============ 4. 运动模式：避免同时高速+高旋转 ============
+        mode_selector = torch.rand(len(env_ids), device=self.device)
+        straight_mode = mode_selector < 0.6
+        if not self.cfg.commands.heading_command:
+            self.commands[env_ids[straight_mode], 2] *= 0.3
+        
+        turning_mode = mode_selector >= 0.9
+        self.commands[env_ids[turning_mode], 0] *= 0.4
+        self.commands[env_ids[turning_mode], 1] *= 0.4
+
+        # ============ 5. 过滤过小的命令 ============
+        lin_vel_norm = torch.norm(self.commands[env_ids, :2], dim=1)
+        small_cmd_mask = lin_vel_norm < 0.15
+        self.commands[env_ids[small_cmd_mask], :2] = 0.0
+        
+        if self.cfg.commands.heading_command:
+            self.commands[env_ids[small_cmd_mask], 3] = 0.0
     
     def _init_camera_augmentation_curriculum(self):
         """初始化相机数据增强的课程学习参数"""

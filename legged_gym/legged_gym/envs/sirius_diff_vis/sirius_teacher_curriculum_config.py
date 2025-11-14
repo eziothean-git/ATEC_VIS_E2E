@@ -295,13 +295,27 @@ class SiriusTeacherCurriculum(SiriusJoyFlat):
                 device=self.device
             ).squeeze(1)
         
-        # ============ 2. 线速度 Y 方向采样 ============
+        # ============ 2. 线速度 Y 方向采样（限制为小偏移，避免纯侧向运动）============
+        # 🔧 策略：横向速度作为前进方向的小偏移，范围缩小到 ±30% 的前进速度
+        # 这样可以产生斜向运动，但不会出现纯侧向的"螃蟹步"
+        
+        # 计算当前前进速度的绝对值
+        forward_speed_abs = torch.abs(self.commands[env_ids, 0])
+        
+        # 横向速度限制为前进速度的 ±30%，最大不超过 0.15 m/s
+        max_lateral_speed = torch.clamp(forward_speed_abs * 0.3, max=0.15)
+        
+        # 在 [-max_lateral_speed, +max_lateral_speed] 范围内随机采样
         self.commands[env_ids, 1] = torch_rand_float(
-            self.command_ranges["lin_vel_y"][0], 
-            self.command_ranges["lin_vel_y"][1], 
+            -1.0, 
+            1.0, 
             (len(env_ids), 1), 
             device=self.device
-        ).squeeze(1)
+        ).squeeze(1) * max_lateral_speed
+        
+        # 如果前进速度很小（< 0.1），直接取消横向速度
+        small_forward_mask = forward_speed_abs < 0.1
+        self.commands[env_ids[small_forward_mask], 1] = 0.0
         
         # ============ 3. 朝向命令：与速度方向对齐（±5度）============
         if self.cfg.commands.heading_command:
