@@ -1079,14 +1079,19 @@ class SiriusJoyFlat(BaseTask):
         px, py, pz = self.cfg.camera.position
         r, p, yaw = self.cfg.camera.rpy
 
-        # Draw for first few environments only (to avoid clutter)
-        num_envs_to_draw = min(4, self.num_envs)
+        # Draw for a subset of environments (to avoid clutter); configurable via cfg.camera.vis_num_envs / vis_stride
+        vis_num_envs_cfg = int(getattr(self.cfg.camera, 'vis_num_envs', 4))
+        vis_stride = max(1, int(getattr(self.cfg.camera, 'vis_stride', 1)))
+        if vis_num_envs_cfg <= 0:
+            indices = list(range(0, self.num_envs, vis_stride))
+        else:
+            indices = list(range(0, min(self.num_envs, vis_num_envs_cfg * vis_stride), vis_stride))
 
         # Use tensor API to get root states
         self.gym.refresh_actor_root_state_tensor(self.sim)
         root_positions = self.root_states[:, :3].cpu().numpy()  # (N, 3)
 
-        for i in range(num_envs_to_draw):
+        for i in indices:
             env = self.envs[i]
             # Get robot base position from tensor
             base_x, base_y, base_z = root_positions[i]

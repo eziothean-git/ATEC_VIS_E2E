@@ -237,9 +237,16 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
         rpy = [0.0, 0.785398, 0.0]  # pitch down ~45 degrees (positive = looking down)
 
+        # 🧩 可视化线框控制（仅影响viewer中的可视化，不影响是否创建相机传感器）
+        # - vis_num_envs > 0: 仅绘制前 N 个环境的相机位置（默认4，避免视野混乱）
+        # - vis_num_envs <= 0: 绘制所有环境的相机位置（可能非常拥挤/慢）
+        # - vis_stride: 按步长抽样绘制（例如 stride=4 则绘制 0,4,8,...）
+        vis_num_envs = 4
+        vis_stride = 1
+
         # 🔍 启用调试输出：定期保存深度图到磁盘
         debug_outputs = True
-        display_interval_steps = 50  # 每50个仿真步保存一次（避免IO过载）
+        display_interval_steps = 1000  # 每1000个仿真步保存一次（避免IO过载）
         
         # 🎯 渐进式数据增强（Data Augmentation Curriculum）
         # 随着训练进展，逐步增加噪声和干扰，提高对真实世界传感器缺陷的鲁棒性

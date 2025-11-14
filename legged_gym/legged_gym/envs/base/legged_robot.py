@@ -835,8 +835,15 @@ class LeggedRobot(BaseTask):
         px, py, pz = self.cfg.camera.position
         r, p, yaw = self.cfg.camera.rpy
         
-        # Draw for first few environments only (to avoid clutter)
-        num_envs_to_draw = min(4, self.num_envs)
+        # Draw for a subset of environments (to avoid clutter); configurable via cfg.camera.vis_num_envs / vis_stride
+        vis_num_envs_cfg = int(getattr(self.cfg.camera, 'vis_num_envs', 4))
+        vis_stride = max(1, int(getattr(self.cfg.camera, 'vis_stride', 1)))
+        if vis_num_envs_cfg <= 0:
+            # <=0 means draw all envs (still allow stride)
+            indices = list(range(0, self.num_envs, vis_stride))
+        else:
+            # take first vis_num_envs_cfg envs with stride
+            indices = list(range(0, min(self.num_envs, vis_num_envs_cfg * vis_stride), vis_stride))
         # Use tensor API (compatible with GPU pipeline) to get base/root positions
         # Refresh root state tensor and read base positions instead of calling
         # get_actor_rigid_body_states which is incompatible with GPU pipeline
@@ -844,7 +851,7 @@ class LeggedRobot(BaseTask):
         root_positions = self.root_states[:, :3].cpu().numpy()  # (N, 3)
 
         import math
-        for i in range(num_envs_to_draw):
+        for i in indices:
             env = self.envs[i]
 
             base_x, base_y, base_z = root_positions[i]
