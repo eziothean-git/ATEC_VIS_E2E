@@ -200,8 +200,8 @@ class SiriusCurriculumILCfgPPO(SiriusCurriculumCfgPPO):
         imitation_curriculum = True
         imitation_coef_schedule = {
             'start': 1.0,    # 初始权重
-            'end': 0.3,      # 最终权重
-            'iterations': 1500,  # 在1500次迭代内线性衰减
+            'end': 0.2,      # 最终权重
+            'iterations': 750,  # 在750次迭代内线性衰减
         }
         
         # ========== PPO 超参数 ==========
@@ -214,7 +214,7 @@ class SiriusCurriculumILCfgPPO(SiriusCurriculumCfgPPO):
         schedule = 'adaptive'
         
         # 熵系数：降低随机探索（更多模仿教师）
-        entropy_coef = 0.01  # vs 0.015 in curriculum
+        entropy_coef = 0.0075  # vs 0.015 in curriculum
         
         # 梯度和KL散度
         desired_kl = 0.01  # 更保守（避免偏离教师太远）

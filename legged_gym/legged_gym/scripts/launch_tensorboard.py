@@ -7,6 +7,7 @@ LOGS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../logs')
 FOLDERS = [
     'sirius_curriculum',
     'sirius_teacher_curriculum',
+    'sirius_curriculum_il',
     'sirius_flat',
 ]
 
