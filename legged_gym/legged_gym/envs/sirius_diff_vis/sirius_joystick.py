@@ -912,6 +912,7 @@ class SiriusJoyFlat(BaseTask):
         if not self.init_done:
             # don't change on initial reset
             return
+        
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
         
         # robots that walked far enough progress to harder terrains
@@ -923,14 +924,18 @@ class SiriusJoyFlat(BaseTask):
         # 现在: 升级 > 4m，降级 < 2m，安全区 2-4m
         move_down = (distance < self.terrain.env_length / 4) * ~move_up
         
-        # 更新地形难度
-        old_levels = self.terrain_levels[env_ids].clone()
+        # 更新地形难度（行）
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         
         # Robots that solve the last level are sent to a random one
-        self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
-                                                   torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-                                                   torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            self.terrain_levels[env_ids]
+        )
+        
+        # 确保不超出范围
+        self.terrain_levels[env_ids] = torch.clip(self.terrain_levels[env_ids], 0, self.max_terrain_level - 1)
         
         # 🔍 调试输出：监控地形课程变化
         if len(env_ids) > 0 and self.common_step_counter % self.max_episode_length == 0:
@@ -1682,25 +1687,66 @@ class SiriusJoyFlat(BaseTask):
             print(f"  num_cols (地形类型): {self.cfg.terrain.num_cols}")
             print(f"  num_envs (环境数): {self.num_envs}")
             
-            # 🎨 混合策略：大部分环境课程学习 + 少量环境视觉探索
-            visual_exploration_ratio = getattr(self.cfg.terrain, 'visual_exploration_ratio', 0.0)
-            num_curriculum_envs = int(self.num_envs * (1 - visual_exploration_ratio))
-            num_exploration_envs = self.num_envs - num_curriculum_envs
-            
-            # 课程学习环境：在 [0, max_init_level] 范围内随机
-            self.terrain_levels = torch.randint(0, max_init_level+1, (self.num_envs,), device=self.device)
-            
-            # 视觉探索环境：在所有难度随机分布（提供视觉多样性）
-            if num_exploration_envs > 0:
-                exploration_ids = torch.randperm(self.num_envs, device=self.device)[:num_exploration_envs]
-                self.terrain_levels[exploration_ids] = torch.randint(
-                    0, self.cfg.terrain.num_rows, 
-                    (num_exploration_envs,), 
-                    device=self.device
-                )
-                print(f"  visual_exploration_ratio: {visual_exploration_ratio:.1%}")
-                print(f"  课程学习环境: {num_curriculum_envs} ({num_curriculum_envs/self.num_envs:.1%})")
-                print(f"  视觉探索环境: {num_exploration_envs} ({num_exploration_envs/self.num_envs:.1%})")
+            # 🎨 自定义课程分布策略
+            if hasattr(self.cfg.terrain, 'curriculum_distribution'):
+                dist = self.cfg.terrain.curriculum_distribution
+                easy_ratio = dist.get('easy_ratio', 0.80)
+                medium_ratio = dist.get('medium_ratio', 0.15)
+                exploration_ratio = dist.get('exploration_ratio', 0.05)
+                
+                # 计算各部分环境数量
+                num_easy = int(self.num_envs * easy_ratio)
+                num_medium = int(self.num_envs * medium_ratio)
+                num_exploration = self.num_envs - num_easy - num_medium
+                
+                # 初始化地形难度（行）
+                self.terrain_levels = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+                
+                # 1. 80% 环境：难度 0-1（简单地形）
+                easy_levels = torch.randint(0, 2, (num_easy,), device=self.device)  # 0或1
+                self.terrain_levels[:num_easy] = easy_levels
+                
+                # 2. 15% 环境：难度 2（中等难度）
+                self.terrain_levels[num_easy:num_easy+num_medium] = 2
+                
+                # 3. 5% 环境：视觉探索（随机难度）
+                if num_exploration > 0:
+                    exploration_levels = torch.randint(
+                        0, self.cfg.terrain.num_rows, 
+                        (num_exploration,), 
+                        device=self.device
+                    )
+                    self.terrain_levels[num_easy+num_medium:] = exploration_levels
+                
+                # 随机打乱顺序（避免按顺序排列）
+                perm = torch.randperm(self.num_envs, device=self.device)
+                self.terrain_levels = self.terrain_levels[perm]
+                
+                print(f"\n✅ 使用自定义课程分布:")
+                print(f"  简单地形 (难度0-1): {num_easy} 个环境 ({easy_ratio:.1%})")
+                print(f"  中等地形 (难度2):   {num_medium} 个环境 ({medium_ratio:.1%})")
+                print(f"  视觉探索:           {num_exploration} 个环境 ({exploration_ratio:.1%})")
+                
+            else:
+                # 原始策略：混合课程学习 + 视觉探索
+                visual_exploration_ratio = getattr(self.cfg.terrain, 'visual_exploration_ratio', 0.0)
+                num_curriculum_envs = int(self.num_envs * (1 - visual_exploration_ratio))
+                num_exploration_envs = self.num_envs - num_curriculum_envs
+                
+                # 课程学习环境：在 [0, max_init_level] 范围内随机
+                self.terrain_levels = torch.randint(0, max_init_level+1, (self.num_envs,), device=self.device)
+                
+                # 视觉探索环境：在所有难度随机分布（提供视觉多样性）
+                if num_exploration_envs > 0:
+                    exploration_ids = torch.randperm(self.num_envs, device=self.device)[:num_exploration_envs]
+                    self.terrain_levels[exploration_ids] = torch.randint(
+                        0, self.cfg.terrain.num_rows, 
+                        (num_exploration_envs,), 
+                        device=self.device
+                    )
+                    print(f"  visual_exploration_ratio: {visual_exploration_ratio:.1%}")
+                    print(f"  课程学习环境: {num_curriculum_envs} ({num_curriculum_envs/self.num_envs:.1%})")
+                    print(f"  视觉探索环境: {num_exploration_envs} ({num_exploration_envs/self.num_envs:.1%})")
             
             # 🐛 打印初始地形难度分布
             print(f"\n初始地形难度分布:")
@@ -1711,7 +1757,64 @@ class SiriusJoyFlat(BaseTask):
                 print(f"  {marker} 难度 {level}: {count:4d} 个环境 ({percentage:5.2f}%)")
             print(f"{'='*60}\n")
             
-            self.terrain_types = torch.div(torch.arange(self.num_envs, device=self.device), (self.num_envs/self.cfg.terrain.num_cols), rounding_mode='floor').to(torch.long)
+            # 🎯 随机分配地形类型（列），跳过指定的地形类型
+            skip_types = getattr(self.cfg.terrain, 'skip_terrain_types', [])
+            
+            # 创建可用的地形类型列表（排除跳过的类型）
+            available_types = [i for i in range(self.cfg.terrain.num_cols) if i not in skip_types]
+            
+            if len(available_types) == 0:
+                raise ValueError(f"所有地形类型都被跳过了！skip_terrain_types={skip_types}")
+            
+            # 使用 terrain_proportions 配置（如果有的话）
+            if hasattr(self.cfg.terrain, 'terrain_proportions') and self.cfg.terrain.terrain_proportions:
+                # 根据比例配置分配地形类型
+                original_proportions = np.array(self.cfg.terrain.terrain_proportions)
+                
+                # 只保留未跳过的类型的比例
+                filtered_proportions = np.array([original_proportions[i] for i in available_types])
+                filtered_proportions = filtered_proportions / filtered_proportions.sum()  # 重新归一化
+                
+                # 为每个环境按比例随机选择地形类型
+                selected_indices = np.random.choice(
+                    len(available_types),
+                    size=self.num_envs,
+                    p=filtered_proportions
+                )
+                self.terrain_types = torch.tensor(
+                    [available_types[idx] for idx in selected_indices],
+                    device=self.device,
+                    dtype=torch.long
+                )
+                
+                print(f"✅ 使用地形类型比例配置（跳过类型 {skip_types}）:")
+                for i, type_idx in enumerate(available_types):
+                    count = (self.terrain_types == type_idx).sum().item()
+                    expected = filtered_proportions[i] * 100
+                    actual = count / self.num_envs * 100
+                    print(f"  类型 {type_idx}: {count:4d} 个环境 (预期 {expected:5.2f}%, 实际 {actual:5.2f}%)")
+                
+                # 检查跳过的类型
+                for type_idx in skip_types:
+                    count = (self.terrain_types == type_idx).sum().item()
+                    if count > 0:
+                        print(f"  ❌ 错误：类型 {type_idx} 有 {count} 个环境（应该被跳过）")
+                    else:
+                        print(f"  🚫 类型 {type_idx}: 已跳过（台阶地形）")
+            else:
+                # 原始策略：从可用类型中随机分配
+                selected_indices = torch.randint(
+                    0, len(available_types), 
+                    (self.num_envs,), 
+                    device=self.device
+                )
+                self.terrain_types = torch.tensor(
+                    [available_types[idx.item()] for idx in selected_indices],
+                    device=self.device,
+                    dtype=torch.long
+                )
+                print(f"✅ 随机分配地形类型（跳过类型 {skip_types}）")
+            
             self.max_terrain_level = self.cfg.terrain.num_rows
             self.terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
             self.env_origins[:] = self.terrain_origins[self.terrain_levels, self.terrain_types]
@@ -1970,6 +2073,27 @@ class SiriusJoyFlat(BaseTask):
         # Penalize feet hitting vertical surfaces
         return torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) >\
              5 *torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1)
+    
+    def _reward_feet_contact_number(self):
+        """
+        Penalize having less than 2 feet in contact with ground.
+        
+        This encourages stable multi-foot support and discourages risky behaviors
+        like jumping or balancing on single foot.
+        
+        Returns:
+            torch.Tensor: Per-env penalty (0 if >= 2 feet in contact, 1 if < 2 feet in contact)
+                          Shape: (num_envs,)
+        """
+        # Determine which feet are in contact (normal force > 1N)
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        
+        # Count number of feet in contact for each environment
+        num_contact_feet = torch.sum(contact, dim=1)
+        
+        # Return 1.0 (penalty) if less than 2 feet in contact, 0.0 otherwise
+        # This will be multiplied by the negative weight in config (e.g., -2.0)
+        return (num_contact_feet < 2).float()
         
     def _reward_stand_still(self):
         # Penalize motion at zero commands

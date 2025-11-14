@@ -92,9 +92,17 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         max_init_terrain_level = 1  # 最大初始难度级别（索引0-1，对应难度0.0-0.1）
                                      # 机器人将从简单地形开始，逐步晋级
         
-        # 🎨 视觉多样性增强：在简单课程的同时，保留少量环境在复杂地形做"视觉探索"
-        # 这样视觉编码器从一开始就能见到各种场景，避免过拟合到平地
-        visual_exploration_ratio = 0.15  # 15% 的环境用于视觉探索（在所有难度随机分布）
+        # 🎨 课程学习生成分布
+        # 分布策略：
+        # - 80% 在难度 0-1（简单地形，斜坡为主）
+        # - 15% 在难度 2（斜坡+粗糙，中等难度）
+        # - 5% 视觉探索（随机难度，保持视觉编码器泛化能力）
+        curriculum_distribution = {
+            'easy_ratio': 0.80,      # 80% 难度0-1
+            'medium_ratio': 0.15,    # 15% 难度2
+            'exploration_ratio': 0.05,  # 5% 视觉探索（所有难度随机）
+        }
+        skip_terrain_types = [4, 5]  # 🚫 跳过地形类型4-5（障碍物、踏脚石），这些地形容易导致滑落和策略欺骗
         
         # 地形分辨率
         horizontal_scale = 0.1  # 0.1m per pixel
@@ -140,12 +148,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_tracking_lin_vel
             # 公式: r = exp(-||v_cmd_xy - v_base_xy||^2 / tracking_sigma)
             # 周期: 每步
-            tracking_lin_vel = 10.0
+            tracking_lin_vel = 2.5
 
             # 实现路径: sirius_joystick.py::_reward_tracking_ang_vel
             # 公式: r = exp(-(ω_cmd_z - ω_base_z)^2 / tracking_sigma)
             # 周期: 每步
-            tracking_ang_vel = 10
+            tracking_ang_vel = 2
 
             # 实现路径: sirius_joystick.py::_reward_orientation
             # 公式: r = g_x^2 + g_y^2（projected_gravity 前两轴平方和）
@@ -170,7 +178,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 实现路径: sirius_joystick.py::_reward_action_rate
             # 公式: r = Σ (a_t - a_{t-1})^2
             # 周期: 每步
-            action_rate = -0.025
+            action_rate = -0.5
 
             # 实现路径: sirius_joystick.py::_reward_posture
             # 公式: r = exp( - Σ (q - q_default)^2 · w )，w = [1,1,0.1]×4
@@ -203,6 +211,12 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
             # 公式: 1{ ||F_xy|| > 5 * |F_z| }
             # 周期: 每步（布尔事件）
             stumble = -0.5
+
+            # 实现路径: sirius_joystick.py::_reward_feet_contact_number
+            # 公式: 1{ num_contact_feet < 2 }
+            # 周期: 每步
+            # 说明: 惩罚接地腿数少于2条的情况，鼓励稳定的多足支撑
+            feet_contact_number = -5
 
             # === 终止惩罚 Termination ===
             # 实现路径: sirius_joystick.py::_reward_termination
@@ -688,6 +702,7 @@ class SiriusCurriculum(SiriusJoyFlat):
         更新地形课程难度
         
         🔧 修复：调整晋级/降级条件，防止难度增长过快
+        🚫 跳过指定难度：避免深坑和凸台导致的策略欺骗
         
         原始逻辑问题：
         - 晋级条件太宽松：走 4m（地形长度一半）就晋级
@@ -698,12 +713,16 @@ class SiriusCurriculum(SiriusJoyFlat):
         - 晋级条件：需要走到地形长度的 70% 才晋级（更严格）
         - 降级条件：如果走不到地形长度的 30% 则降级（更宽松）
         - 同时考虑速度跟随质量：tracking reward < 40% 时不晋级
+        - 跳过指定难度：避免难度3-4（台阶上下）
         
         Args:
             env_ids (List[int]): 需要重置的环境ID
         """
         if not self.init_done:
             return
+        
+        # 获取跳过的难度列表
+        skip_levels = getattr(self.cfg.terrain, 'skip_terrain_levels', [])
         
         # 计算每个环境走过的距离
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
@@ -728,13 +747,45 @@ class SiriusCurriculum(SiriusJoyFlat):
         # 更新地形难度
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
         
-        # 达到最高难度的机器人随机分配到中等难度（保持挑战性）
+        # 🚫 跳过指定难度：如果更新后落在跳过的难度，自动跳到下一个有效难度
+        if len(skip_levels) > 0:
+            for env_idx in env_ids:
+                current_level = self.terrain_levels[env_idx].item()
+                
+                # 如果在跳过的难度列表中
+                if current_level in skip_levels:
+                    # 向上晋级：跳到下一个非跳过的难度
+                    if move_up[env_ids == env_idx].any():
+                        next_level = current_level + 1
+                        while next_level in skip_levels and next_level < self.max_terrain_level:
+                            next_level += 1
+                        self.terrain_levels[env_idx] = min(next_level, self.max_terrain_level - 1)
+                    # 向下降级：跳到前一个非跳过的难度
+                    elif move_down[env_ids == env_idx].any():
+                        prev_level = current_level - 1
+                        while prev_level in skip_levels and prev_level >= 0:
+                            prev_level -= 1
+                        self.terrain_levels[env_idx] = max(prev_level, 0)
+        
+        # 达到最高难度的机器人随机分配到中等难度（保持挑战性，但避免跳过的难度）
         max_level = self.max_terrain_level
-        self.terrain_levels[env_ids] = torch.where(
-            self.terrain_levels[env_ids] >= max_level,
-            torch.randint_like(self.terrain_levels[env_ids], max_level // 2, max_level),  # 随机到中高难度
-            torch.clip(self.terrain_levels[env_ids], 0, max_level - 1)
-        )
+        max_level_mask = self.terrain_levels[env_ids] >= max_level
+        
+        if max_level_mask.any():
+            # 创建可用难度列表（排除跳过的难度）
+            available_levels = [i for i in range(max_level // 2, max_level) if i not in skip_levels]
+            if len(available_levels) > 0:
+                for i, env_idx in enumerate(env_ids[max_level_mask]):
+                    random_level = available_levels[torch.randint(0, len(available_levels), (1,)).item()]
+                    self.terrain_levels[env_idx] = random_level
+            else:
+                # 如果没有可用难度，使用裁剪
+                self.terrain_levels[env_ids[max_level_mask]] = torch.clip(
+                    self.terrain_levels[env_ids[max_level_mask]], 0, max_level - 1
+                )
+        
+        # 确保不超出范围
+        self.terrain_levels[env_ids] = torch.clip(self.terrain_levels[env_ids], 0, max_level - 1)
         
         # 更新环境原点
         self.env_origins[env_ids] = self.terrain_origins[
@@ -747,6 +798,8 @@ class SiriusCurriculum(SiriusJoyFlat):
             avg_level = self.terrain_levels.float().mean().item()
             max_current = self.terrain_levels.max().item()
             print(f"[Terrain Curriculum] Avg level: {avg_level:.2f}, Max: {max_current}/{max_level}")
+            if len(skip_levels) > 0:
+                print(f"  🚫 Skipping levels: {skip_levels}")
     
     def update_command_curriculum(self, env_ids):
         """
