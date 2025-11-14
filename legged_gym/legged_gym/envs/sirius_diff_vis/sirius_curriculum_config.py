@@ -233,6 +233,10 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         enable_tensors = True  # GPU 优化
         use_collision_geometry = False
         
+        body_name = "trunk"  # main body link in sirius URDF
+        position = [0.45, 0.0, -0.03]  # forward 45cm, height -3cm
+        rpy = [0.0, 0.785398, 0.0]  # pitch down ~45 degrees (positive = looking down)
+
         # 🔍 启用调试输出：定期保存深度图到磁盘
         debug_outputs = True
         display_interval_steps = 50  # 每50个仿真步保存一次（避免IO过载）
