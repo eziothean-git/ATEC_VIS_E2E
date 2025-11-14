@@ -98,6 +98,30 @@ def train(args):
             pass
 
     env, env_cfg = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    
+    # 🔥🔥🔥 强制打印环境类型 🔥🔥🔥
+    print("\n" + "="*80)
+    print("🔥🔥🔥 ENVIRONMENT CLASS CHECK 🔥🔥🔥")
+    print(f"Task name: {args.task}")
+    print(f"Env class: {type(env).__name__}")
+    print(f"Env module: {type(env).__module__}")
+    print(f"Env file: {type(env).__module__.replace('.', '/')}.py")
+    
+    import inspect
+    if hasattr(env, '_post_physics_step_callback'):
+        callback_file = inspect.getfile(env._post_physics_step_callback)
+        callback_line = inspect.getsourcelines(env._post_physics_step_callback)[1]
+        print(f"_post_physics_step_callback from: {callback_file}:{callback_line}")
+    
+    if hasattr(env, '_resample_commands'):
+        resample_file = inspect.getfile(env._resample_commands)
+        resample_line = inspect.getsourcelines(env._resample_commands)[1]
+        print(f"_resample_commands from: {resample_file}:{resample_line}")
+    
+    print(f"heading_command = {env.cfg.commands.heading_command}")
+    print("="*80 + "\n")
+    # 🔥🔥🔥 END CHECK 🔥🔥🔥
+    
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
     # If camera is enabled via CLI or config, spawn a background monitor thread
     # that periodically fetches camera depth images and writes them to disk.

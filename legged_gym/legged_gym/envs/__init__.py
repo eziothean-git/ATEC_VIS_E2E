@@ -83,6 +83,13 @@ from .sirius_diff_vis.sirius_curriculum_finetune_config import (
     SiriusCurriculumFinetuneCfgPPO,
 )
 
+# 导入教师策略curriculum训练任务（纯本体感知MLP在curriculum地形上训练）
+from .sirius_diff_vis.sirius_teacher_curriculum_config import (
+    SiriusTeacherCurriculum,
+    SiriusTeacherCurriculumCfg,
+    SiriusTeacherCurriculumCfgPPO,
+)
+
 # 注册统一的 diff_vis 任务名，供 python train.py --task=sirius_diff_vis 使用
 # 这里直接使用两段桥环境
 task_registry.register(
@@ -115,4 +122,13 @@ task_registry.register(
     SiriusCurriculumFinetuneCfg(),
     SiriusCurriculumFinetuneCfgPPO(),
 )
+
+# 注册教师策略curriculum训练任务（纯本体感知）
+task_registry.register(
+    "sirius_teacher_curriculum",
+    SiriusTeacherCurriculum,
+    SiriusTeacherCurriculumCfg(),
+    SiriusTeacherCurriculumCfgPPO(),
+)
+
 
