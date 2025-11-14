@@ -72,7 +72,7 @@ class SiriusCurriculumCfg(SiriusFlatCfg):
         num_envs = 512  # 建议用较多envs覆盖更多地形
 
     class terrain(SiriusFlatCfg.terrain):
-        mesh_type = "heightfield"  # 🚀 使用 heightfield（比 trimesh 效率高得多！）
+        mesh_type = "trimesh"  # 🚀 使用 heightfield（比 trimesh 效率高得多！）
         
         # ⚠️ 启用课程学习！
         curriculum = True
